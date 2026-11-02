@@ -80,9 +80,19 @@ def _run_commands(ci_text):
         step_lines.clear()
 
     in_steps = False
+    in_test_job = False
+    job_disabled = False
     for line in ci_text.splitlines():
         stripped = line.strip()
         if stripped.startswith("#"):
+            continue
+        if stripped == "test:":
+            in_test_job = True
+            continue
+        if in_test_job and not in_steps and stripped.startswith("if:"):
+            value = stripped.split(":", 1)[1].strip().strip("'\"").lower()
+            if value == "false":
+                job_disabled = True
             continue
         if stripped == "steps:":
             in_steps = True
@@ -94,6 +104,8 @@ def _run_commands(ci_text):
         if in_steps:
             step_lines.append(stripped)
     flush_step()
+    if job_disabled:
+        return []
     return commands
 
 
@@ -117,6 +129,25 @@ def test_ci_gate_parser_skips_a_step_disabled_with_if_false():
         commands = _run_commands(disabled)
         assert "python -m pytest -q" not in commands
         assert "python scripts/codepoint_scan.py" in commands
+
+
+def test_ci_gate_parser_rejects_a_job_disabled_with_if_false():
+    ci_text = read(".github/workflows/ci.yml")
+    job_head = "  test:\n    runs-on: ubuntu-latest"
+    assert job_head in ci_text
+    for flag in ("false", '"false"'):
+        disabled = ci_text.replace(
+            job_head,
+            "  test:\n"
+            f"    if: {flag}\n"
+            "    runs-on: ubuntu-latest",
+        )
+        commands = _run_commands(disabled)
+        assert "python -m pytest -q" not in commands
+        assert "python scripts/codepoint_scan.py" not in commands
+    commands = _run_commands(ci_text)
+    assert "python -m pytest -q" in commands
+    assert "python scripts/codepoint_scan.py" in commands
 
 
 def test_codepoint_scan_reports_zero_for_the_repo():
