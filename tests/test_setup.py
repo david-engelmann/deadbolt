@@ -141,6 +141,11 @@ def test_readme_has_exactly_one_status_section():
     assert readme.count("\n## Status\n") == 1
 
 
+def test_readme_carries_no_wrong_arc_label():
+    readme = read("README.md")
+    assert "Fleet Operations" not in readme
+
+
 def _scan_tree(root):
     return subprocess.run(
         [sys.executable, str(ROOT / "scripts" / "codepoint_scan.py"), str(root)],
