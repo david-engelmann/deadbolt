@@ -29,10 +29,7 @@ fn main() -> ExitCode {
 fn exit_code(err: &Error) -> u8 {
     match err {
         Error::Caller(_) | Error::Io(_) => 2,
-        Error::Refusal(_)
-        | Error::Redeem(_)
-        | Error::Corrupt(_)
-        | Error::Permission(_) => 1,
+        Error::Refusal(_) | Error::Redeem(_) | Error::Corrupt(_) | Error::Permission(_) => 1,
     }
 }
 
@@ -72,7 +69,9 @@ impl Options {
                 options.flags.push(arg.clone());
                 index += 1;
             } else {
-                return Err(caller("an argument the command does not offer stands in the call"));
+                return Err(caller(
+                    "an argument the command does not offer stands in the call",
+                ));
             }
         }
         Ok(options)
@@ -88,7 +87,9 @@ impl Options {
         match found.len() {
             0 => Ok(None),
             1 => Ok(Some(found[0].clone())),
-            _ => Err(caller("an option that takes one value was given more than once")),
+            _ => Err(caller(
+                "an option that takes one value was given more than once",
+            )),
         }
     }
 
@@ -143,11 +144,7 @@ fn run(args: &[String]) -> Result<String, Error> {
     let now = now_seconds();
     match command {
         "enroll" => {
-            let options = Options::parse(
-                rest,
-                &["--name", "--value-file", "--scope"],
-                &[],
-            )?;
+            let options = Options::parse(rest, &["--name", "--value-file", "--scope"], &[])?;
             let name = options.required("--name")?;
             let value_file = options.required("--value-file")?;
             let scope_texts = options.many("--scope");
@@ -160,10 +157,7 @@ fn run(args: &[String]) -> Result<String, Error> {
             }
             let value = read_value_file(&value_file)?;
             deadbolt::enroll(&state, &name, &value, &scopes, now)?;
-            Ok(format!(
-                "{}\n",
-                serde_json::json!({"enrolled": name})
-            ))
+            Ok(format!("{}\n", serde_json::json!({"enrolled": name})))
         }
         "retire" => {
             let options = Options::parse(rest, &["--name"], &[])?;
@@ -175,20 +169,16 @@ fn run(args: &[String]) -> Result<String, Error> {
             ))
         }
         "grant" => {
-            let options = Options::parse(
-                rest,
-                &["--credential", "--scope", "--ttl", "--run"],
-                &[],
-            )?;
+            let options =
+                Options::parse(rest, &["--credential", "--scope", "--ttl", "--run"], &[])?;
             let credential = options.required("--credential")?;
             let scope = parse_scope(&options.required("--scope")?)?;
             let ttl_text = options.required("--ttl")?;
-            let ttl: u64 = ttl_text.parse().map_err(|_| {
-                caller("the time to live is not a whole number of seconds")
-            })?;
+            let ttl: u64 = ttl_text
+                .parse()
+                .map_err(|_| caller("the time to live is not a whole number of seconds"))?;
             let run = options.one("--run")?;
-            let receipt =
-                deadbolt::grant(&state, &credential, &scope, ttl, run.as_deref(), now)?;
+            let receipt = deadbolt::grant(&state, &credential, &scope, ttl, run.as_deref(), now)?;
             Ok(format!(
                 "{}\n",
                 serde_json::json!({
@@ -209,10 +199,7 @@ fn run(args: &[String]) -> Result<String, Error> {
             let options = Options::parse(rest, &["--grant"], &[])?;
             let grant_id = options.required("--grant")?;
             deadbolt::revoke(&state, &grant_id, now)?;
-            Ok(format!(
-                "{}\n",
-                serde_json::json!({"revoked": grant_id})
-            ))
+            Ok(format!("{}\n", serde_json::json!({"revoked": grant_id})))
         }
         "cutoff" => {
             let options = Options::parse(rest, &["--run"], &[])?;

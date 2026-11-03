@@ -12,7 +12,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.91.1"
+          components: rustfmt, clippy
       - name: Run the local gate
         run: cargo test
       - name: Run the codepoint scan
         run: cargo run --bin codepoint_scan
+      - name: Check the formatting
+        run: cargo fmt --check
+      - name: Run the linter
+        run: cargo clippy --all-targets -- -D warnings

@@ -13,6 +13,8 @@ use sha2::{Digest, Sha256};
 const MARKER: &str = "<!-- repo annex below this line -->";
 const GATE_COMMAND: &str = "cargo test";
 const SCAN_COMMAND: &str = "cargo run --bin codepoint_scan";
+const FMT_COMMAND: &str = "cargo fmt --check";
+const CLIPPY_COMMAND: &str = "cargo clippy --all-targets -- -D warnings";
 
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -23,10 +25,8 @@ fn read(name: &str) -> String {
 }
 
 fn temp_dir(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "deadbolt-setup-test-{}-{tag}",
-        std::process::id()
-    ));
+    let dir =
+        std::env::temp_dir().join(format!("deadbolt-setup-test-{}-{tag}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
@@ -68,7 +68,10 @@ fn agents_canonical_part_carries_program_headings() {
 fn contract_names_five_setup_obligations() {
     let text = read("CONTRACT.md");
     for name in ["S1", "S2", "S3", "S4", "S5"] {
-        assert!(text.contains(&format!("Obligation {name} covers")), "{name}");
+        assert!(
+            text.contains(&format!("Obligation {name} covers")),
+            "{name}"
+        );
     }
     assert!(!text.contains("Obligation S6"));
 }
@@ -91,10 +94,7 @@ fn readme_status_states_zero_of_one_hundred() {
     assert!(status.contains("08a05b881350c6ca5eb8a42af28d25f194c6d039"));
 }
 
-fn flush_step(
-    step_lines: &mut Vec<String>,
-    commands: &mut Vec<String>,
-) {
+fn flush_step(step_lines: &mut Vec<String>, commands: &mut Vec<String>) {
     if step_lines.is_empty() {
         return;
     }
@@ -137,8 +137,8 @@ fn run_commands(ci_text: &str) -> Vec<String> {
         }
         if in_test_job && !in_steps && stripped.starts_with("if:") {
             let value = stripped
-                .splitn(2, ':')
-                .nth(1)
+                .split_once(':')
+                .map(|(_, rest)| rest)
                 .unwrap_or_default()
                 .trim()
                 .trim_matches(|c| c == '\'' || c == '"')
@@ -173,6 +173,8 @@ fn ci_runs_the_local_gate_commands() {
     let commands = run_commands(&read(".github/workflows/ci.yml"));
     assert!(commands.iter().any(|c| c == GATE_COMMAND));
     assert!(commands.iter().any(|c| c == SCAN_COMMAND));
+    assert!(commands.iter().any(|c| c == FMT_COMMAND));
+    assert!(commands.iter().any(|c| c == CLIPPY_COMMAND));
 }
 
 #[test]
@@ -206,10 +208,14 @@ fn ci_gate_parser_rejects_a_job_disabled_with_if_false() {
         let commands = run_commands(&disabled);
         assert!(!commands.iter().any(|c| c == GATE_COMMAND));
         assert!(!commands.iter().any(|c| c == SCAN_COMMAND));
+        assert!(!commands.iter().any(|c| c == FMT_COMMAND));
+        assert!(!commands.iter().any(|c| c == CLIPPY_COMMAND));
     }
     let commands = run_commands(&ci_text);
     assert!(commands.iter().any(|c| c == GATE_COMMAND));
     assert!(commands.iter().any(|c| c == SCAN_COMMAND));
+    assert!(commands.iter().any(|c| c == FMT_COMMAND));
+    assert!(commands.iter().any(|c| c == CLIPPY_COMMAND));
 }
 
 struct ScanOutput {

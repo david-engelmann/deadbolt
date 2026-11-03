@@ -51,7 +51,7 @@ impl std::fmt::Display for Error {
             Error::Redeem(reason) => write!(f, "redeem refused, {}", reason.word()),
             Error::Corrupt(message) => write!(f, "{message}"),
             Error::Permission(message) => write!(f, "{message}"),
-            Error::Io(err) => write!(f, "the filesystem refused an operation, {err}"),
+            Error::Io(err) => write!(f, "{err}"),
         }
     }
 }
@@ -60,8 +60,21 @@ impl std::error::Error for Error {}
 
 impl From<std::io::Error> for Error {
     fn from(err: std::io::Error) -> Self {
-        Error::Io(err)
+        Error::Io(std::io::Error::new(
+            err.kind(),
+            format!("the filesystem refused an operation, {err}"),
+        ))
     }
+}
+
+/// The environment failure for a filesystem refusal on an operator
+/// supplied path. The line names the path and names the failure as
+/// the filesystem refusing it, as DK-13 states.
+fn io_refusal(path: &Path, err: std::io::Error) -> Error {
+    Error::Io(std::io::Error::new(
+        err.kind(),
+        format!("the filesystem refused the path {}, {err}", path.display()),
+    ))
 }
 
 /// The four distinct redemption refusal reasons of DK-7.
@@ -228,6 +241,17 @@ fn parse_state(text: &str) -> Result<State, Error> {
     }
     let mut ids: Vec<&str> = Vec::new();
     let mut hashes: Vec<&str> = Vec::new();
+    // Live in DK-2 carries the meaning DK-7 gives it, judged against
+    // the latest instant the document itself records in its audit
+    // trail. A grant already dead by expiry at that instant is not
+    // live, so it may name a credential that retirement removed,
+    // exactly as DK-4 leaves it standing unended.
+    let document_floor = state
+        .audit
+        .iter()
+        .map(|entry| entry.at)
+        .max()
+        .unwrap_or(INSTANT_MIN);
     for grant in &state.grants {
         if ids.contains(&grant.id.as_str()) {
             return Err(Error::Corrupt(
@@ -250,7 +274,8 @@ fn parse_state(text: &str) -> Result<State, Error> {
         }
         match (&grant.ended_at, &grant.end_reason) {
             (None, None) => {
-                if !names.contains(&grant.credential.as_str()) {
+                if grant.expires_at > document_floor && !names.contains(&grant.credential.as_str())
+                {
                     return Err(Error::Corrupt(
                         "a live grant in the state file names a credential that does not stand"
                             .to_string(),
@@ -353,10 +378,14 @@ impl Session {
         let lock_path = PathBuf::from(format!("{}.lock", state_path.display()));
         let lock = OpenOptions::new()
             .create(true)
+            .truncate(false)
+            .mode(0o600)
             .read(true)
             .write(true)
-            .open(&lock_path)?;
-        lock.lock_exclusive()?;
+            .open(&lock_path)
+            .map_err(|err| io_refusal(state_path, err))?;
+        lock.lock_exclusive()
+            .map_err(|err| io_refusal(state_path, err))?;
         match std::fs::metadata(state_path) {
             Ok(metadata) => {
                 let mode = metadata.mode() & 0o777;
@@ -367,11 +396,9 @@ impl Session {
                 }
                 let text = std::fs::read_to_string(state_path).map_err(|err| {
                     if err.kind() == std::io::ErrorKind::InvalidData {
-                        Error::Corrupt(
-                            "the state file is not valid UTF-8 text".to_string(),
-                        )
+                        Error::Corrupt("the state file is not valid UTF-8 text".to_string())
                     } else {
-                        Error::Io(err)
+                        io_refusal(state_path, err)
                     }
                 })?;
                 let state = parse_state(&text)?;
@@ -388,7 +415,7 @@ impl Session {
                 exists: false,
                 _lock: lock,
             }),
-            Err(err) => Err(Error::Io(err)),
+            Err(err) => Err(io_refusal(state_path, err)),
         }
     }
 
@@ -416,19 +443,45 @@ impl Session {
                 .create_new(true)
                 .write(true)
                 .mode(0o600)
-                .open(&temp_path)?;
-            file.write_all(text.as_bytes())?;
-            file.write_all(b"\n")?;
-            file.sync_all()?;
+                .open(&temp_path)
+                .map_err(|err| io_refusal(&temp_path, err))?;
+            file.write_all(text.as_bytes())
+                .map_err(|err| io_refusal(&temp_path, err))?;
+            file.write_all(b"\n")
+                .map_err(|err| io_refusal(&temp_path, err))?;
+            file.sync_all().map_err(|err| io_refusal(&temp_path, err))?;
             Ok(())
         })();
         if let Err(err) = write {
             let _ = std::fs::remove_file(&temp_path);
             return Err(err);
         }
-        std::fs::rename(&temp_path, &self.state_path)?;
+        std::fs::rename(&temp_path, &self.state_path)
+            .map_err(|err| io_refusal(&self.state_path, err))?;
         if let Ok(dir_file) = File::open(&directory) {
             let _ = dir_file.sync_all();
+        }
+        Ok(())
+    }
+
+    /// Record a refusal in the audit trail and publish it, DK-9.
+    /// Every refusal against a loaded state goes through here, so
+    /// the recording and the publication cannot drift apart between
+    /// operations. An act against a state that does not stand
+    /// records nothing, because there is no state to record it in.
+    fn record_refusal(
+        &mut self,
+        at: i64,
+        kind: &str,
+        credential: Option<&str>,
+        scope: Option<&Scope>,
+        run_id: Option<&str>,
+        outcome: String,
+    ) -> Result<(), Error> {
+        if self.exists {
+            self.state
+                .record(at, kind, credential, scope, run_id, outcome);
+            self.publish()?;
         }
         Ok(())
     }
@@ -486,17 +539,14 @@ pub fn enroll(
         .iter()
         .any(|credential| credential.name == name)
     {
-        if session.exists {
-            session.state.record(
-                now,
-                "enroll",
-                Some(name),
-                None,
-                None,
-                "refused, name already stands".to_string(),
-            );
-            session.publish()?;
-        }
+        session.record_refusal(
+            now,
+            "enroll",
+            Some(name),
+            None,
+            None,
+            "refused, name already stands".to_string(),
+        )?;
         return Err(Error::Refusal(format!(
             "enroll refused, a credential named {name} already stands"
         )));
@@ -507,9 +557,14 @@ pub fn enroll(
         scopes: scopes.to_vec(),
         enrolled_at: now,
     });
-    session
-        .state
-        .record(now, "enroll", Some(name), None, None, "enrolled".to_string());
+    session.state.record(
+        now,
+        "enroll",
+        Some(name),
+        None,
+        None,
+        "enrolled".to_string(),
+    );
     session.publish()?;
     Ok(())
 }
@@ -526,24 +581,21 @@ pub fn retire(state_path: &Path, name: &str, now: i64) -> Result<usize, Error> {
         .iter()
         .any(|credential| credential.name == name)
     {
-        if session.exists {
-            session.state.record(
-                now,
-                "retire",
-                Some(name),
-                None,
-                None,
-                "refused, unknown credential".to_string(),
-            );
-            session.publish()?;
-        }
+        session.record_refusal(
+            now,
+            "retire",
+            Some(name),
+            None,
+            None,
+            "refused, unknown credential".to_string(),
+        )?;
         return Err(Error::Refusal(format!(
             "retire refused, no credential named {name} stands"
         )));
     }
     let mut ended = 0;
     for grant in session.state.grants.iter_mut() {
-        if grant.credential == name && grant.ended_at.is_none() {
+        if grant.credential == name && grant.ended_at.is_none() && now < grant.expires_at {
             grant.ended_at = Some(now);
             grant.end_reason = Some("retired".to_string());
             ended += 1;
@@ -553,14 +605,9 @@ pub fn retire(state_path: &Path, name: &str, now: i64) -> Result<usize, Error> {
         .state
         .credentials
         .retain(|credential| credential.name != name);
-    session.state.record(
-        now,
-        "retire",
-        Some(name),
-        None,
-        None,
-        "retired".to_string(),
-    );
+    session
+        .state
+        .record(now, "retire", Some(name), None, None, "retired".to_string());
     session.publish()?;
     Ok(ended)
 }
@@ -586,7 +633,9 @@ pub fn grant(
     }
     check_instant(now)?;
     let expires_at = now.checked_add(ttl as i64).ok_or_else(|| {
-        Error::Caller("the grant expiry would pass the largest instant the broker keeps".to_string())
+        Error::Caller(
+            "the grant expiry would pass the largest instant the broker keeps".to_string(),
+        )
     })?;
     if expires_at > INSTANT_MAX {
         return Err(Error::Caller(
@@ -602,41 +651,40 @@ pub fn grant(
     let credential = match credential {
         Some(credential) => credential,
         None => {
-            if session.exists {
-                session.state.record(
-                    now,
-                    "grant",
-                    Some(credential_name),
-                    Some(scope),
-                    run_id,
-                    "refused, unknown credential".to_string(),
-                );
-                session.publish()?;
-            }
+            session.record_refusal(
+                now,
+                "grant",
+                Some(credential_name),
+                Some(scope),
+                run_id,
+                "refused, unknown credential".to_string(),
+            )?;
             return Err(Error::Refusal(format!(
                 "grant refused, no credential named {credential_name} stands"
             )));
         }
     };
     if !credential.scopes.contains(scope) {
-        if session.exists {
-            session.state.record(
-                now,
-                "grant",
-                Some(credential_name),
-                Some(scope),
-                run_id,
-                "refused, scope not enrolled".to_string(),
-            );
-            session.publish()?;
-        }
+        session.record_refusal(
+            now,
+            "grant",
+            Some(credential_name),
+            Some(scope),
+            run_id,
+            "refused, scope not enrolled".to_string(),
+        )?;
         return Err(Error::Refusal(
             "grant refused, the credential does not carry the requested scope".to_string(),
         ));
     }
     let token = random_hex(32)?;
     let mut grant_id = random_hex(16)?;
-    while session.state.grants.iter().any(|grant| grant.id == grant_id) {
+    while session
+        .state
+        .grants
+        .iter()
+        .any(|grant| grant.id == grant_id)
+    {
         grant_id = random_hex(16)?;
     }
     session.state.grants.push(Grant {
@@ -669,12 +717,7 @@ pub fn grant(
 
 /// Redeem a token for the value it guards, DK-7. On success this
 /// returns the credential value and nothing else.
-pub fn redeem(
-    state_path: &Path,
-    token: &str,
-    scope: &Scope,
-    now: i64,
-) -> Result<String, Error> {
+pub fn redeem(state_path: &Path, token: &str, scope: &Scope, now: i64) -> Result<String, Error> {
     check_scope(scope)?;
     check_instant(now)?;
     let mut session = Session::open(state_path)?;
@@ -687,17 +730,14 @@ pub fn redeem(
     let position = match position {
         Some(position) => position,
         None => {
-            if session.exists {
-                session.state.record(
-                    now,
-                    "redeem",
-                    None,
-                    Some(scope),
-                    None,
-                    "refused, unknown token".to_string(),
-                );
-                session.publish()?;
-            }
+            session.record_refusal(
+                now,
+                "redeem",
+                None,
+                Some(scope),
+                None,
+                "refused, unknown token".to_string(),
+            )?;
             return Err(Error::Redeem(RedeemRefusal::UnknownToken));
         }
     };
@@ -714,17 +754,14 @@ pub fn redeem(
     let credential_name = session.state.grants[position].credential.clone();
     let run_id = session.state.grants[position].run_id.clone();
     if let Some(reason) = refusal {
-        if session.exists {
-            session.state.record(
-                now,
-                "redeem",
-                Some(&credential_name),
-                Some(scope),
-                run_id.as_deref(),
-                format!("refused, {}", reason.word()),
-            );
-            session.publish()?;
-        }
+        session.record_refusal(
+            now,
+            "redeem",
+            Some(&credential_name),
+            Some(scope),
+            run_id.as_deref(),
+            format!("refused, {}", reason.word()),
+        )?;
         return Err(Error::Redeem(reason));
     }
     let value = session
@@ -760,50 +797,44 @@ pub fn revoke(state_path: &Path, grant_id: &str, now: i64) -> Result<(), Error> 
     let position = match position {
         Some(position) => position,
         None => {
-            if session.exists {
-                session.state.record(
-                    now,
-                    "revoke",
-                    None,
-                    None,
-                    None,
-                    "refused, unknown grant".to_string(),
-                );
-                session.publish()?;
-            }
+            session.record_refusal(
+                now,
+                "revoke",
+                None,
+                None,
+                None,
+                "refused, unknown grant".to_string(),
+            )?;
             return Err(Error::Refusal(
                 "revoke refused, no grant carries that id".to_string(),
             ));
         }
     };
-    if let Some(reason) = session.state.grants[position].end_reason.clone() {
-        let credential = session.state.grants[position].credential.clone();
-        let scope = Scope {
-            resource: session.state.grants[position].resource.clone(),
-            action: session.state.grants[position].action.clone(),
-        };
-        let run_id = session.state.grants[position].run_id.clone();
-        if session.exists {
-            session.state.record(
-                now,
-                "revoke",
-                Some(&credential),
-                Some(&scope),
-                run_id.as_deref(),
-                "refused, grant already ended".to_string(),
-            );
-            session.publish()?;
-        }
+    let (credential, scope, run_id, end_reason) = {
+        let grant = &session.state.grants[position];
+        (
+            grant.credential.clone(),
+            Scope {
+                resource: grant.resource.clone(),
+                action: grant.action.clone(),
+            },
+            grant.run_id.clone(),
+            grant.end_reason.clone(),
+        )
+    };
+    if let Some(reason) = end_reason {
+        session.record_refusal(
+            now,
+            "revoke",
+            Some(&credential),
+            Some(&scope),
+            run_id.as_deref(),
+            "refused, grant already ended".to_string(),
+        )?;
         return Err(Error::Refusal(format!(
             "revoke refused, the grant already ended by {reason}"
         )));
     }
-    let credential = session.state.grants[position].credential.clone();
-    let scope = Scope {
-        resource: session.state.grants[position].resource.clone(),
-        action: session.state.grants[position].action.clone(),
-    };
-    let run_id = session.state.grants[position].run_id.clone();
     session.state.grants[position].ended_at = Some(now);
     session.state.grants[position].end_reason = Some("revoked".to_string());
     session.state.record(
@@ -830,24 +861,24 @@ pub fn cutoff(state_path: &Path, run_id: &str, now: i64) -> Result<usize, Error>
         .iter()
         .any(|grant| grant.run_id.as_deref() == Some(run_id))
     {
-        if session.exists {
-            session.state.record(
-                now,
-                "cutoff",
-                None,
-                None,
-                Some(run_id),
-                "refused, unknown run".to_string(),
-            );
-            session.publish()?;
-        }
+        session.record_refusal(
+            now,
+            "cutoff",
+            None,
+            None,
+            Some(run_id),
+            "refused, unknown run".to_string(),
+        )?;
         return Err(Error::Refusal(
             "cutoff refused, no grant carries that run id".to_string(),
         ));
     }
     let mut ended = 0;
     for grant in session.state.grants.iter_mut() {
-        if grant.run_id.as_deref() == Some(run_id) && grant.ended_at.is_none() {
+        if grant.run_id.as_deref() == Some(run_id)
+            && grant.ended_at.is_none()
+            && now < grant.expires_at
+        {
             grant.ended_at = Some(now);
             grant.end_reason = Some("cutoff".to_string());
             ended += 1;

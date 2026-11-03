@@ -4,7 +4,7 @@
 //! can be mistaken for a real key.
 
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -18,10 +18,7 @@ static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 fn test_dir(tag: &str) -> PathBuf {
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-    let dir = std::env::temp_dir().join(format!(
-        "deadbolt-test-{}-{tag}-{n}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("deadbolt-test-{}-{tag}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
@@ -38,7 +35,7 @@ fn read_scope() -> Scope {
     scope("bucket", "read")
 }
 
-fn enroll_a(state: &PathBuf) {
+fn enroll_a(state: &Path) {
     deadbolt::enroll(
         state,
         "cache-key",
@@ -75,7 +72,10 @@ fn enroll_grant_redeem_round_trip_and_expiry_boundary() {
     let value = deadbolt::redeem(&state, &receipt.token, &read_scope(), T0 + 59).unwrap();
     assert_eq!(value, VALUE_A);
     let err = deadbolt::redeem(&state, &receipt.token, &read_scope(), T0 + 60).unwrap_err();
-    assert!(matches!(err, Error::Redeem(RedeemRefusal::Expired)), "{err}");
+    assert!(
+        matches!(err, Error::Redeem(RedeemRefusal::Expired)),
+        "{err}"
+    );
 }
 
 #[test]
@@ -83,8 +83,7 @@ fn enroll_duplicate_name_is_refused_and_recorded() {
     let dir = test_dir("dup-enroll");
     let state = dir.join("state.json");
     enroll_a(&state);
-    let err = deadbolt::enroll(&state, "cache-key", VALUE_B, &[read_scope()], T0 + 1)
-        .unwrap_err();
+    let err = deadbolt::enroll(&state, "cache-key", VALUE_B, &[read_scope()], T0 + 1).unwrap_err();
     assert!(matches!(err, Error::Refusal(_)), "{err}");
     let entries = deadbolt::audit(&state).unwrap();
     assert_eq!(entries.len(), 2);
@@ -199,7 +198,10 @@ fn token_shape_and_storage() {
     assert_ne!(one.token, two.token);
     assert_ne!(one.grant_id, two.grant_id);
     let text = state_text(&state);
-    assert!(!text.contains(&one.token), "the token itself must not be stored");
+    assert!(
+        !text.contains(&one.token),
+        "the token itself must not be stored"
+    );
     let json = state_json(&state);
     let hash = json["grants"][0]["token_hash"].as_str().unwrap();
     assert_eq!(hash.len(), 64);
@@ -212,16 +214,28 @@ fn redeem_refusal_reasons_are_distinct() {
     let state = dir.join("state.json");
     enroll_a(&state);
     let err = deadbolt::redeem(&state, &"0".repeat(64), &read_scope(), T0).unwrap_err();
-    assert!(matches!(err, Error::Redeem(RedeemRefusal::UnknownToken)), "{err}");
+    assert!(
+        matches!(err, Error::Redeem(RedeemRefusal::UnknownToken)),
+        "{err}"
+    );
     let receipt = deadbolt::grant(&state, "cache-key", &read_scope(), 60, None, T0).unwrap();
-    let err = deadbolt::redeem(&state, &receipt.token, &scope("bucket", "write"), T0 + 1)
-        .unwrap_err();
-    assert!(matches!(err, Error::Redeem(RedeemRefusal::ScopeMismatch)), "{err}");
+    let err =
+        deadbolt::redeem(&state, &receipt.token, &scope("bucket", "write"), T0 + 1).unwrap_err();
+    assert!(
+        matches!(err, Error::Redeem(RedeemRefusal::ScopeMismatch)),
+        "{err}"
+    );
     let err = deadbolt::redeem(&state, &receipt.token, &read_scope(), T0 + 60).unwrap_err();
-    assert!(matches!(err, Error::Redeem(RedeemRefusal::Expired)), "{err}");
+    assert!(
+        matches!(err, Error::Redeem(RedeemRefusal::Expired)),
+        "{err}"
+    );
     deadbolt::revoke(&state, &receipt.grant_id, T0 + 61).unwrap();
     let err = deadbolt::redeem(&state, &receipt.token, &read_scope(), T0 + 30).unwrap_err();
-    assert!(matches!(err, Error::Redeem(RedeemRefusal::Revoked)), "{err}");
+    assert!(
+        matches!(err, Error::Redeem(RedeemRefusal::Revoked)),
+        "{err}"
+    );
 }
 
 #[test]
@@ -232,9 +246,15 @@ fn revoke_is_permanent_and_double_revoke_is_refused() {
     let receipt = deadbolt::grant(&state, "cache-key", &read_scope(), 600, None, T0).unwrap();
     deadbolt::revoke(&state, &receipt.grant_id, T0 + 100).unwrap();
     let err = deadbolt::redeem(&state, &receipt.token, &read_scope(), T0 + 50).unwrap_err();
-    assert!(matches!(err, Error::Redeem(RedeemRefusal::Revoked)), "{err}");
+    assert!(
+        matches!(err, Error::Redeem(RedeemRefusal::Revoked)),
+        "{err}"
+    );
     let err = deadbolt::revoke(&state, &receipt.grant_id, T0 + 101).unwrap_err();
-    assert!(format!("{err}").contains("already ended by revoked"), "{err}");
+    assert!(
+        format!("{err}").contains("already ended by revoked"),
+        "{err}"
+    );
     let err = deadbolt::revoke(&state, "no-such-grant", T0 + 102).unwrap_err();
     assert!(matches!(err, Error::Refusal(_)), "{err}");
 }
@@ -244,9 +264,19 @@ fn cutoff_ends_only_the_named_run() {
     let dir = test_dir("cutoff");
     let state = dir.join("state.json");
     enroll_a(&state);
-    let run_one = deadbolt::grant(&state, "cache-key", &read_scope(), 600, Some("run-1"), T0).unwrap();
-    let run_one_b = deadbolt::grant(&state, "cache-key", &scope("bucket", "write"), 600, Some("run-1"), T0).unwrap();
-    let run_two = deadbolt::grant(&state, "cache-key", &read_scope(), 600, Some("run-2"), T0).unwrap();
+    let run_one =
+        deadbolt::grant(&state, "cache-key", &read_scope(), 600, Some("run-1"), T0).unwrap();
+    let run_one_b = deadbolt::grant(
+        &state,
+        "cache-key",
+        &scope("bucket", "write"),
+        600,
+        Some("run-1"),
+        T0,
+    )
+    .unwrap();
+    let run_two =
+        deadbolt::grant(&state, "cache-key", &read_scope(), 600, Some("run-2"), T0).unwrap();
     let runless = deadbolt::grant(&state, "cache-key", &read_scope(), 600, None, T0).unwrap();
     let ended = deadbolt::cutoff(&state, "run-1", T0 + 10).unwrap();
     assert_eq!(ended, 2);
@@ -257,7 +287,10 @@ fn cutoff_ends_only_the_named_run() {
             scope("bucket", "write")
         };
         let err = deadbolt::redeem(&state, &receipt.token, &wanted, T0 + 20).unwrap_err();
-        assert!(matches!(err, Error::Redeem(RedeemRefusal::Revoked)), "{err}");
+        assert!(
+            matches!(err, Error::Redeem(RedeemRefusal::Revoked)),
+            "{err}"
+        );
     }
     assert_eq!(
         deadbolt::redeem(&state, &run_two.token, &read_scope(), T0 + 20).unwrap(),
@@ -282,7 +315,10 @@ fn retire_ends_grants_inside_their_window() {
     let ended = deadbolt::retire(&state, "cache-key", T0 + 10).unwrap();
     assert_eq!(ended, 1);
     let err = deadbolt::redeem(&state, &receipt.token, &read_scope(), T0 + 20).unwrap_err();
-    assert!(matches!(err, Error::Redeem(RedeemRefusal::Revoked)), "{err}");
+    assert!(
+        matches!(err, Error::Redeem(RedeemRefusal::Revoked)),
+        "{err}"
+    );
     let err = deadbolt::grant(&state, "cache-key", &read_scope(), 60, None, T0 + 30).unwrap_err();
     assert!(matches!(err, Error::Refusal(_)), "{err}");
     let err = deadbolt::retire(&state, "cache-key", T0 + 40).unwrap_err();
@@ -300,7 +336,8 @@ fn audit_records_every_act_in_order() {
     let dir = test_dir("audit-order");
     let state = dir.join("state.json");
     enroll_a(&state);
-    let receipt = deadbolt::grant(&state, "cache-key", &read_scope(), 600, Some("run-1"), T0).unwrap();
+    let receipt =
+        deadbolt::grant(&state, "cache-key", &read_scope(), 600, Some("run-1"), T0).unwrap();
     deadbolt::redeem(&state, &receipt.token, &read_scope(), T0 + 1).unwrap();
     let _ = deadbolt::redeem(&state, &receipt.token, &scope("bucket", "write"), T0 + 2);
     deadbolt::revoke(&state, &receipt.grant_id, T0 + 3).unwrap();
@@ -308,7 +345,10 @@ fn audit_records_every_act_in_order() {
     deadbolt::retire(&state, "cache-key", T0 + 5).unwrap();
     let entries = deadbolt::audit(&state).unwrap();
     let kinds: Vec<&str> = entries.iter().map(|e| e.kind.as_str()).collect();
-    assert_eq!(kinds, ["enroll", "grant", "redeem", "redeem", "revoke", "cutoff", "retire"]);
+    assert_eq!(
+        kinds,
+        ["enroll", "grant", "redeem", "redeem", "revoke", "cutoff", "retire"]
+    );
     let outcomes: Vec<&str> = entries.iter().map(|e| e.outcome.as_str()).collect();
     assert_eq!(
         outcomes,
@@ -354,7 +394,10 @@ fn refusals_against_a_missing_state_create_no_file() {
     let dir = test_dir("missing-state");
     let state = dir.join("state.json");
     let err = deadbolt::redeem(&state, &"0".repeat(64), &read_scope(), T0).unwrap_err();
-    assert!(matches!(err, Error::Redeem(RedeemRefusal::UnknownToken)), "{err}");
+    assert!(
+        matches!(err, Error::Redeem(RedeemRefusal::UnknownToken)),
+        "{err}"
+    );
     assert!(deadbolt::grant(&state, "ghost", &read_scope(), 60, None, T0).is_err());
     assert!(deadbolt::retire(&state, "ghost", T0).is_err());
     assert!(deadbolt::revoke(&state, "ghost-grant", T0).is_err());
@@ -413,15 +456,26 @@ fn corrupt_variants() -> Vec<(String, String)> {
     let mut variants: Vec<(String, String)> = Vec::new();
     variants.push((
         "duplicated key at the top level".to_string(),
-        good.replacen("\"format\"", "\"format\": \"deadbolt-state/1\", \"format\"", 1),
+        good.replacen(
+            "\"format\"",
+            "\"format\": \"deadbolt-state/1\", \"format\"",
+            1,
+        ),
     ));
     variants.push((
         "duplicated key inside a credential".to_string(),
-        good.replacen("\"name\": \"cache-key\"", "\"name\": \"cache-key\", \"name\": \"cache-key\"", 1),
+        good.replacen(
+            "\"name\": \"cache-key\"",
+            "\"name\": \"cache-key\", \"name\": \"cache-key\"",
+            1,
+        ),
     ));
     let mut doc = serde_json::from_str::<serde_json::Value>(&good).unwrap();
     doc["surprise"] = serde_json::json!(true);
-    variants.push(("unknown field at the top level".to_string(), doc.to_string()));
+    variants.push((
+        "unknown field at the top level".to_string(),
+        doc.to_string(),
+    ));
     let mut doc = serde_json::from_str::<serde_json::Value>(&good).unwrap();
     doc["grants"][0]["surprise"] = serde_json::json!(true);
     variants.push(("unknown field inside a grant".to_string(), doc.to_string()));
@@ -430,11 +484,17 @@ fn corrupt_variants() -> Vec<(String, String)> {
     variants.push(("credentials of the wrong type".to_string(), doc.to_string()));
     let mut doc = serde_json::from_str::<serde_json::Value>(&good).unwrap();
     doc["format"] = serde_json::json!("deadbolt-state/2");
-    variants.push(("a format this broker does not read".to_string(), doc.to_string()));
+    variants.push((
+        "a format this broker does not read".to_string(),
+        doc.to_string(),
+    ));
     let mut doc = serde_json::from_str::<serde_json::Value>(&good).unwrap();
     let twin = doc["credentials"][0].clone();
     doc["credentials"].as_array_mut().unwrap().push(twin);
-    variants.push(("a credential name standing twice".to_string(), doc.to_string()));
+    variants.push((
+        "a credential name standing twice".to_string(),
+        doc.to_string(),
+    ));
     let mut doc = serde_json::from_str::<serde_json::Value>(&good).unwrap();
     let twin = doc["grants"][0].clone();
     doc["grants"].as_array_mut().unwrap().push(twin);
@@ -444,16 +504,28 @@ fn corrupt_variants() -> Vec<(String, String)> {
     variants.push(("a gap in the audit sequence".to_string(), doc.to_string()));
     let mut doc = serde_json::from_str::<serde_json::Value>(&good).unwrap();
     doc["credentials"].as_array_mut().unwrap().clear();
-    variants.push(("a live grant naming no standing credential".to_string(), doc.to_string()));
+    variants.push((
+        "a live grant naming no standing credential".to_string(),
+        doc.to_string(),
+    ));
     let mut doc = serde_json::from_str::<serde_json::Value>(&good).unwrap();
     doc["grants"][0]["expires_at"] = doc["grants"][0]["granted_at"].clone();
-    variants.push(("a grant expiring at its own grant instant".to_string(), doc.to_string()));
+    variants.push((
+        "a grant expiring at its own grant instant".to_string(),
+        doc.to_string(),
+    ));
     let mut doc = serde_json::from_str::<serde_json::Value>(&good).unwrap();
     doc["grants"][0]["ended_at"] = serde_json::json!(T0 + 1);
-    variants.push(("an ending in only one of its two fields".to_string(), doc.to_string()));
+    variants.push((
+        "an ending in only one of its two fields".to_string(),
+        doc.to_string(),
+    ));
     let mut doc = serde_json::from_str::<serde_json::Value>(&good).unwrap();
     doc["credentials"][0]["enrolled_at"] = serde_json::json!(253_402_300_800i64);
-    variants.push(("a stored instant outside its range".to_string(), doc.to_string()));
+    variants.push((
+        "a stored instant outside its range".to_string(),
+        doc.to_string(),
+    ));
     variants.push((
         "a stored number with thousands of digits".to_string(),
         good.replacen(
@@ -476,7 +548,11 @@ fn strict_reading_refuses_every_corrupt_variant() {
         assert!(matches!(err, Error::Corrupt(_)), "{label}: {err}");
         let err = deadbolt::grant(&state, "cache-key", &read_scope(), 60, None, T0).unwrap_err();
         assert!(matches!(err, Error::Corrupt(_)), "{label}: {err}");
-        assert_eq!(state_text(&state), text, "{label}: the file must never be reset");
+        assert_eq!(
+            state_text(&state),
+            text,
+            "{label}: the file must never be reset"
+        );
     }
 }
 
@@ -537,24 +613,42 @@ fn run_cli(args: &[&str]) -> CliOutput {
     }
 }
 
-fn write_value_file(dir: &PathBuf, value: &str) -> String {
+fn write_value_file(dir: &Path, value: &str) -> String {
     let path = dir.join("value.txt");
     std::fs::write(&path, format!("{value}\n")).unwrap();
     path.to_string_lossy().into_owned()
 }
 
-fn cli_enroll_and_grant(dir: &PathBuf) -> (String, String) {
+fn cli_enroll_and_grant(dir: &Path) -> (String, String) {
     let state = dir.join("state.json");
     let state_arg = state.to_string_lossy().into_owned();
     let value_file = write_value_file(dir, VALUE_A);
     let out = run_cli(&[
-        "--state", &state_arg, "enroll", "--name", "cache-key", "--value-file", &value_file,
-        "--scope", "bucket:read", "--scope", "bucket:write",
+        "--state",
+        &state_arg,
+        "enroll",
+        "--name",
+        "cache-key",
+        "--value-file",
+        &value_file,
+        "--scope",
+        "bucket:read",
+        "--scope",
+        "bucket:write",
     ]);
     assert_eq!(out.status, 0, "{}", out.stderr);
     let out = run_cli(&[
-        "--state", &state_arg, "grant", "--credential", "cache-key", "--scope", "bucket:read",
-        "--ttl", "600", "--run", "run-1",
+        "--state",
+        &state_arg,
+        "grant",
+        "--credential",
+        "cache-key",
+        "--scope",
+        "bucket:read",
+        "--ttl",
+        "600",
+        "--run",
+        "run-1",
     ]);
     assert_eq!(out.status, 0, "{}", out.stderr);
     let parsed: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
@@ -571,7 +665,13 @@ fn cli_round_trip_and_redeem_output_is_the_value_alone() {
     let state_arg = state.to_string_lossy().into_owned();
     let (token, _grant_id) = cli_enroll_and_grant(&dir);
     let out = run_cli(&[
-        "--state", &state_arg, "redeem", "--token", &token, "--scope", "bucket:read",
+        "--state",
+        &state_arg,
+        "redeem",
+        "--token",
+        &token,
+        "--scope",
+        "bucket:read",
     ]);
     assert_eq!(out.status, 0, "{}", out.stderr);
     assert_eq!(out.stdout, format!("{VALUE_A}\n"));
@@ -585,22 +685,38 @@ fn cli_refusals_exit_1_with_distinct_single_line_errors() {
     let state_arg = state.to_string_lossy().into_owned();
     let (token, grant_id) = cli_enroll_and_grant(&dir);
     let out = run_cli(&[
-        "--state", &state_arg, "redeem", "--token", &"0".repeat(64), "--scope", "bucket:read",
+        "--state",
+        &state_arg,
+        "redeem",
+        "--token",
+        &"0".repeat(64),
+        "--scope",
+        "bucket:read",
     ]);
     assert_eq!(out.status, 1);
     assert!(out.stderr.contains("unknown token"), "{}", out.stderr);
     assert_eq!(out.stderr.lines().count(), 1);
     let out = run_cli(&[
-        "--state", &state_arg, "redeem", "--token", &token, "--scope", "bucket:write",
+        "--state",
+        &state_arg,
+        "redeem",
+        "--token",
+        &token,
+        "--scope",
+        "bucket:write",
     ]);
     assert_eq!(out.status, 1);
     assert!(out.stderr.contains("scope mismatch"), "{}", out.stderr);
-    let out = run_cli(&[
-        "--state", &state_arg, "revoke", "--grant", &grant_id,
-    ]);
+    let out = run_cli(&["--state", &state_arg, "revoke", "--grant", &grant_id]);
     assert_eq!(out.status, 0, "{}", out.stderr);
     let out = run_cli(&[
-        "--state", &state_arg, "redeem", "--token", &token, "--scope", "bucket:read",
+        "--state",
+        &state_arg,
+        "redeem",
+        "--token",
+        &token,
+        "--scope",
+        "bucket:read",
     ]);
     assert_eq!(out.status, 1);
     assert!(out.stderr.contains("revoked"), "{}", out.stderr);
@@ -615,12 +731,72 @@ fn cli_caller_errors_exit_2() {
     let cases: Vec<Vec<&str>> = vec![
         vec!["enroll", "--name", "cache-key"],
         vec!["--state", &state_arg, "frobnicate"],
-        vec!["--state", &state_arg, "enroll", "--name", "cache-key", "--value", VALUE_A, "--scope", "bucket:read"],
-        vec!["--state", &state_arg, "enroll", "--name", "cache-key", "--value-file", "/nonexistent/value.txt", "--scope", "bucket:read"],
-        vec!["--state", &state_arg, "enroll", "--name", "cache-key", "--value-file", &value_file, "--scope", "bucketread"],
-        vec!["--state", &state_arg, "grant", "--credential", "cache-key", "--scope", "bucket:read", "--ttl", "abc"],
-        vec!["--state", &state_arg, "grant", "--credential", "cache-key", "--scope", "bucket:read", "--ttl", "86401"],
-        vec!["--state", &state_arg, "grant", "--credential", "cache-key", "--scope", "bucket:read", "--ttl", "99999999999999999999999999"],
+        vec![
+            "--state",
+            &state_arg,
+            "enroll",
+            "--name",
+            "cache-key",
+            "--value",
+            VALUE_A,
+            "--scope",
+            "bucket:read",
+        ],
+        vec![
+            "--state",
+            &state_arg,
+            "enroll",
+            "--name",
+            "cache-key",
+            "--value-file",
+            "/nonexistent/value.txt",
+            "--scope",
+            "bucket:read",
+        ],
+        vec![
+            "--state",
+            &state_arg,
+            "enroll",
+            "--name",
+            "cache-key",
+            "--value-file",
+            &value_file,
+            "--scope",
+            "bucketread",
+        ],
+        vec![
+            "--state",
+            &state_arg,
+            "grant",
+            "--credential",
+            "cache-key",
+            "--scope",
+            "bucket:read",
+            "--ttl",
+            "abc",
+        ],
+        vec![
+            "--state",
+            &state_arg,
+            "grant",
+            "--credential",
+            "cache-key",
+            "--scope",
+            "bucket:read",
+            "--ttl",
+            "86401",
+        ],
+        vec![
+            "--state",
+            &state_arg,
+            "grant",
+            "--credential",
+            "cache-key",
+            "--scope",
+            "bucket:read",
+            "--ttl",
+            "99999999999999999999999999",
+        ],
     ];
     for args in cases {
         let out = run_cli(&args);
@@ -649,50 +825,144 @@ fn cli_containment_battery() {
         ));
         out
     };
-    let enroll_out = drive("enroll", &[
-        "--state", &state_arg, "enroll", "--name", "cache-key", "--value-file", &value_file,
-        "--scope", "bucket:read", "--scope", "bucket:write",
-    ]);
+    let enroll_out = drive(
+        "enroll",
+        &[
+            "--state",
+            &state_arg,
+            "enroll",
+            "--name",
+            "cache-key",
+            "--value-file",
+            &value_file,
+            "--scope",
+            "bucket:read",
+            "--scope",
+            "bucket:write",
+        ],
+    );
     assert_eq!(enroll_out.status, 0, "{}", enroll_out.stderr);
-    let grant_out = drive("grant", &[
-        "--state", &state_arg, "grant", "--credential", "cache-key", "--scope", "bucket:read",
-        "--ttl", "600", "--run", "run-1",
-    ]);
+    let grant_out = drive(
+        "grant",
+        &[
+            "--state",
+            &state_arg,
+            "grant",
+            "--credential",
+            "cache-key",
+            "--scope",
+            "bucket:read",
+            "--ttl",
+            "600",
+            "--run",
+            "run-1",
+        ],
+    );
     assert_eq!(grant_out.status, 0, "{}", grant_out.stderr);
     let parsed: serde_json::Value = serde_json::from_str(&grant_out.stdout).unwrap();
     let token = parsed["token"].as_str().unwrap().to_string();
     let grant_id = parsed["grant_id"].as_str().unwrap().to_string();
-    let redeem_out = drive("redeem", &[
-        "--state", &state_arg, "redeem", "--token", &token, "--scope", "bucket:read",
-    ]);
+    let redeem_out = drive(
+        "redeem",
+        &[
+            "--state",
+            &state_arg,
+            "redeem",
+            "--token",
+            &token,
+            "--scope",
+            "bucket:read",
+        ],
+    );
     assert_eq!(redeem_out.status, 0);
     assert_eq!(redeem_out.stdout, format!("{VALUE_A}\n"));
-    drive("duplicate enroll", &[
-        "--state", &state_arg, "enroll", "--name", "cache-key", "--value-file", &value_file,
-        "--scope", "bucket:read",
-    ]);
-    drive("grant unknown credential", &[
-        "--state", &state_arg, "grant", "--credential", "ghost", "--scope", "bucket:read", "--ttl", "60",
-    ]);
-    drive("grant unenrolled scope", &[
-        "--state", &state_arg, "grant", "--credential", "cache-key", "--scope", "bucket:delete", "--ttl", "60",
-    ]);
-    drive("redeem unknown token", &[
-        "--state", &state_arg, "redeem", "--token", &"0".repeat(64), "--scope", "bucket:read",
-    ]);
-    drive("redeem wrong scope", &[
-        "--state", &state_arg, "redeem", "--token", &token, "--scope", "bucket:write",
-    ]);
-    drive("revoke unknown grant", &[
-        "--state", &state_arg, "revoke", "--grant", "no-such-grant",
-    ]);
-    drive("cutoff unknown run", &[
-        "--state", &state_arg, "cutoff", "--run", "run-9",
-    ]);
-    drive("cutoff", &["--state", &state_arg, "cutoff", "--run", "run-1"]);
-    drive("revoke", &["--state", &state_arg, "revoke", "--grant", &grant_id]);
+    drive(
+        "duplicate enroll",
+        &[
+            "--state",
+            &state_arg,
+            "enroll",
+            "--name",
+            "cache-key",
+            "--value-file",
+            &value_file,
+            "--scope",
+            "bucket:read",
+        ],
+    );
+    drive(
+        "grant unknown credential",
+        &[
+            "--state",
+            &state_arg,
+            "grant",
+            "--credential",
+            "ghost",
+            "--scope",
+            "bucket:read",
+            "--ttl",
+            "60",
+        ],
+    );
+    drive(
+        "grant unenrolled scope",
+        &[
+            "--state",
+            &state_arg,
+            "grant",
+            "--credential",
+            "cache-key",
+            "--scope",
+            "bucket:delete",
+            "--ttl",
+            "60",
+        ],
+    );
+    drive(
+        "redeem unknown token",
+        &[
+            "--state",
+            &state_arg,
+            "redeem",
+            "--token",
+            &"0".repeat(64),
+            "--scope",
+            "bucket:read",
+        ],
+    );
+    drive(
+        "redeem wrong scope",
+        &[
+            "--state",
+            &state_arg,
+            "redeem",
+            "--token",
+            &token,
+            "--scope",
+            "bucket:write",
+        ],
+    );
+    drive(
+        "revoke unknown grant",
+        &["--state", &state_arg, "revoke", "--grant", "no-such-grant"],
+    );
+    drive(
+        "cutoff unknown run",
+        &["--state", &state_arg, "cutoff", "--run", "run-9"],
+    );
+    drive(
+        "cutoff",
+        &["--state", &state_arg, "cutoff", "--run", "run-1"],
+    );
+    drive(
+        "revoke",
+        &["--state", &state_arg, "revoke", "--grant", &grant_id],
+    );
     drive("audit", &["--state", &state_arg, "audit"]);
-    drive("retire", &["--state", &state_arg, "retire", "--name", "cache-key"]);
+    drive(
+        "retire",
+        &["--state", &state_arg, "retire", "--name", "cache-key"],
+    );
     let hash = state_json(&state)["grants"][0]["token_hash"]
         .as_str()
         .unwrap()
@@ -700,13 +970,212 @@ fn cli_containment_battery() {
     for (label, out) in &outputs {
         let everything = format!("{}{}", out.stdout, out.stderr);
         if label.as_str() != "redeem" {
-            assert!(!everything.contains(VALUE_A), "{label} leaked the value: {everything}");
+            assert!(
+                !everything.contains(VALUE_A),
+                "{label} leaked the value: {everything}"
+            );
         }
         if label.as_str() != "grant" {
-            assert!(!everything.contains(&token), "{label} leaked the token: {everything}");
+            assert!(
+                !everything.contains(&token),
+                "{label} leaked the token: {everything}"
+            );
         }
-        assert!(!everything.contains(&hash), "{label} leaked the token hash: {everything}");
+        assert!(
+            !everything.contains(&hash),
+            "{label} leaked the token hash: {everything}"
+        );
     }
     let grant_everything = format!("{}{}", grant_out.stdout, grant_out.stderr);
-    assert!(grant_everything.contains(&token), "grant must show the token once");
+    assert!(
+        grant_everything.contains(&token),
+        "grant must show the token once"
+    );
+}
+
+fn lock_path(state: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.lock", state.display()))
+}
+
+#[test]
+fn cutoff_leaves_expired_grants_unended_and_answering_expired() {
+    let dir = test_dir("cutoff-expired");
+    let state = dir.join("state.json");
+    enroll_a(&state);
+    let short = deadbolt::grant(&state, "cache-key", &read_scope(), 60, Some("run-x"), T0).unwrap();
+    let long = deadbolt::grant(&state, "cache-key", &read_scope(), 600, Some("run-x"), T0).unwrap();
+    let ended = deadbolt::cutoff(&state, "run-x", T0 + 120).unwrap();
+    assert_eq!(ended, 1);
+    let json = state_json(&state);
+    let expired = json["grants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|grant| grant["expires_at"] == T0 + 60)
+        .unwrap();
+    assert!(expired["ended_at"].is_null());
+    assert!(expired["end_reason"].is_null());
+    let err = deadbolt::redeem(&state, &short.token, &read_scope(), T0 + 120).unwrap_err();
+    assert!(
+        matches!(err, Error::Redeem(RedeemRefusal::Expired)),
+        "{err}"
+    );
+    let err = deadbolt::redeem(&state, &long.token, &read_scope(), T0 + 120).unwrap_err();
+    assert!(
+        matches!(err, Error::Redeem(RedeemRefusal::Revoked)),
+        "{err}"
+    );
+}
+
+#[test]
+fn retire_leaves_expired_grants_unended_and_answering_expired() {
+    let dir = test_dir("retire-expired");
+    let state = dir.join("state.json");
+    enroll_a(&state);
+    let short = deadbolt::grant(&state, "cache-key", &read_scope(), 60, None, T0).unwrap();
+    let _long = deadbolt::grant(&state, "cache-key", &read_scope(), 600, None, T0).unwrap();
+    let ended = deadbolt::retire(&state, "cache-key", T0 + 120).unwrap();
+    assert_eq!(ended, 1);
+    let json = state_json(&state);
+    let expired = json["grants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|grant| grant["expires_at"] == T0 + 60)
+        .unwrap();
+    assert!(expired["ended_at"].is_null());
+    assert!(expired["end_reason"].is_null());
+    let err = deadbolt::redeem(&state, &short.token, &read_scope(), T0 + 120).unwrap_err();
+    assert!(
+        matches!(err, Error::Redeem(RedeemRefusal::Expired)),
+        "{err}"
+    );
+}
+
+#[test]
+fn cutoff_over_a_run_of_expired_grants_reports_zero() {
+    let dir = test_dir("cutoff-all-expired");
+    let state = dir.join("state.json");
+    enroll_a(&state);
+    let _one = deadbolt::grant(&state, "cache-key", &read_scope(), 60, Some("run-y"), T0).unwrap();
+    let _two = deadbolt::grant(&state, "cache-key", &read_scope(), 30, Some("run-y"), T0).unwrap();
+    let ended = deadbolt::cutoff(&state, "run-y", T0 + 120).unwrap();
+    assert_eq!(ended, 0);
+    let json = state_json(&state);
+    for grant in json["grants"].as_array().unwrap() {
+        assert!(grant["ended_at"].is_null());
+        assert!(grant["end_reason"].is_null());
+    }
+}
+
+#[test]
+fn missing_state_acts_create_the_lock_file_but_no_state_file() {
+    let dir = test_dir("missing-state-lock");
+    let state = dir.join("state.json");
+    let err = deadbolt::redeem(&state, &"0".repeat(64), &read_scope(), T0).unwrap_err();
+    assert!(
+        matches!(err, Error::Redeem(RedeemRefusal::UnknownToken)),
+        "{err}"
+    );
+    assert!(!state.exists());
+    assert!(lock_path(&state).exists());
+}
+
+#[test]
+fn lock_file_is_created_owner_only() {
+    let dir = test_dir("lock-mode");
+    let state = dir.join("state.json");
+    enroll_a(&state);
+    assert_eq!(mode_of(&lock_path(&state)), 0o600);
+    deadbolt::grant(&state, "cache-key", &read_scope(), 60, None, T0).unwrap();
+    assert_eq!(mode_of(&lock_path(&state)), 0o600);
+}
+
+#[test]
+fn redeem_of_an_expired_grant_at_the_wrong_scope_answers_expired() {
+    let dir = test_dir("expired-beats-scope");
+    let state = dir.join("state.json");
+    enroll_a(&state);
+    let receipt = deadbolt::grant(&state, "cache-key", &read_scope(), 60, None, T0).unwrap();
+    let err =
+        deadbolt::redeem(&state, &receipt.token, &scope("bucket", "write"), T0 + 60).unwrap_err();
+    assert!(
+        matches!(err, Error::Redeem(RedeemRefusal::Expired)),
+        "{err}"
+    );
+}
+
+#[test]
+fn strict_reading_refuses_a_duplicated_token_hash_with_distinct_ids() {
+    let dir = test_dir("dup-hash");
+    let state = dir.join("state.json");
+    enroll_a(&state);
+    deadbolt::grant(&state, "cache-key", &read_scope(), 600, None, T0).unwrap();
+    deadbolt::grant(&state, "cache-key", &read_scope(), 600, None, T0).unwrap();
+    let mut doc = state_json(&state);
+    let hash = doc["grants"][0]["token_hash"].as_str().unwrap().to_string();
+    doc["grants"][1]["token_hash"] = serde_json::json!(hash);
+    let first_id = doc["grants"][0]["id"].as_str().unwrap().to_string();
+    let second_id = doc["grants"][1]["id"].as_str().unwrap().to_string();
+    assert_ne!(first_id, second_id);
+    std::fs::write(&state, doc.to_string()).unwrap();
+    set_mode(&state, 0o600);
+    let err = deadbolt::audit(&state).unwrap_err();
+    assert!(matches!(err, Error::Corrupt(_)), "{err}");
+    assert!(format!("{err}").contains("token hash"), "{err}");
+}
+
+#[test]
+fn a_caller_error_against_a_standing_state_records_nothing() {
+    let dir = test_dir("caller-error-no-record");
+    let state = dir.join("state.json");
+    enroll_a(&state);
+    let before = state_text(&state);
+    let err = deadbolt::grant(&state, "cache-key", &read_scope(), 0, None, T0).unwrap_err();
+    assert!(matches!(err, Error::Caller(_)), "{err}");
+    let err = deadbolt::grant(&state, "cache-key", &read_scope(), 86_401, None, T0).unwrap_err();
+    assert!(matches!(err, Error::Caller(_)), "{err}");
+    assert_eq!(state_text(&state), before);
+    let entries = deadbolt::audit(&state).unwrap();
+    assert_eq!(entries.len(), 1);
+}
+
+#[test]
+fn a_grant_expiring_at_the_largest_instant_succeeds() {
+    let dir = test_dir("instant-max-grant");
+    let state = dir.join("state.json");
+    let start = deadbolt::INSTANT_MAX - 60;
+    deadbolt::enroll(&state, "cache-key", VALUE_A, &[read_scope()], start).unwrap();
+    let receipt = deadbolt::grant(&state, "cache-key", &read_scope(), 60, None, start).unwrap();
+    assert_eq!(receipt.expires_at, deadbolt::INSTANT_MAX);
+    let value = deadbolt::redeem(
+        &state,
+        &receipt.token,
+        &read_scope(),
+        deadbolt::INSTANT_MAX - 1,
+    )
+    .unwrap();
+    assert_eq!(value, VALUE_A);
+    let err =
+        deadbolt::redeem(&state, &receipt.token, &read_scope(), deadbolt::INSTANT_MAX).unwrap_err();
+    assert!(
+        matches!(err, Error::Redeem(RedeemRefusal::Expired)),
+        "{err}"
+    );
+}
+
+#[test]
+fn cli_filesystem_failure_names_the_path_and_exits_2() {
+    let dir = test_dir("cli-io-path");
+    let state = dir.join("missing").join("state.json");
+    let state_arg = state.to_string_lossy().into_owned();
+    let out = run_cli(&["--state", &state_arg, "audit"]);
+    assert_eq!(out.status, 2, "{} {}", out.stdout, out.stderr);
+    assert_eq!(out.stderr.lines().count(), 1);
+    assert!(out.stderr.contains(&state_arg), "{}", out.stderr);
+    assert!(
+        out.stderr.contains("the filesystem refused"),
+        "{}",
+        out.stderr
+    );
 }
