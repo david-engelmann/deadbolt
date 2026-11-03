@@ -1,0 +1,25 @@
+[package]
+name = "deadbolt"
+version = "0.1.0"
+edition = "2021"
+description = "Secrets brokering for agents, scoped and expiring capability tokens over one local state file"
+license = "MIT"
+
+[lib]
+name = "deadbolt"
+path = "src/lib.rs"
+
+[[bin]]
+name = "deadbolt"
+path = "src/bin/deadbolt.rs"
+
+[[bin]]
+name = "codepoint_scan"
+path = "src/bin/codepoint_scan.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+fs2 = "0.4"
+getrandom = "0.3"
