@@ -188,6 +188,9 @@ fn ci_carries_the_fleet_credential_hygiene() {
     assert!(text.contains("permissions:"));
     assert!(text.contains("contents: read"));
     assert!(text.contains("persist-credentials: false"));
+    // No job level override may widen the read only limit.
+    assert!(!text.contains("write-all"));
+    assert!(!text.contains("contents: write"));
     assert!(!text.contains("rust-toolchain@master"));
     let toolchain_line = text
         .lines()
