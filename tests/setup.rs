@@ -90,7 +90,7 @@ fn readme_status_states_one_of_one_hundred() {
     let text = read("README.md");
     assert!(text.contains("## Status"));
     let status = status_section(&text);
-    assert!(status.contains("1 of 100"));
+    assert!(status.contains("Closed perfection rounds are 1 of 100."));
     assert!(status.contains("08a05b881350c6ca5eb8a42af28d25f194c6d039"));
 }
 
@@ -175,6 +175,36 @@ fn ci_runs_the_local_gate_commands() {
     assert!(commands.iter().any(|c| c == SCAN_COMMAND));
     assert!(commands.iter().any(|c| c == FMT_COMMAND));
     assert!(commands.iter().any(|c| c == CLIPPY_COMMAND));
+}
+
+#[test]
+fn ci_carries_the_fleet_credential_hygiene() {
+    let text = read(".github/workflows/ci.yml");
+    // The workflow asks for no more than it uses. Its token
+    // is limited to reading the repository, the checkout
+    // leaves no credential behind for later steps, and the
+    // toolchain action is pinned to a full commit SHA rather
+    // than a moving branch name.
+    assert!(text.contains("permissions:"));
+    assert!(text.contains("contents: read"));
+    assert!(text.contains("persist-credentials: false"));
+    // No job level override may widen the read only limit.
+    assert!(!text.contains("write-all"));
+    assert!(!text.contains("contents: write"));
+    assert!(!text.contains("rust-toolchain@master"));
+    let toolchain_line = text
+        .lines()
+        .find(|line| line.contains("dtolnay/rust-toolchain@"))
+        .expect("the workflow carries no toolchain step");
+    let pin = toolchain_line
+        .split("dtolnay/rust-toolchain@")
+        .nth(1)
+        .unwrap()
+        .trim();
+    assert_eq!(pin.len(), 40, "{}", toolchain_line);
+    assert!(pin
+        .bytes()
+        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
 }
 
 #[test]
