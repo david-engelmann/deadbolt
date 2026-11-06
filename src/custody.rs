@@ -186,79 +186,96 @@ impl KeyCustody for PassphraseCustody {
     }
 }
 
-/// The keychain route's backend, standing behind the keyring crate.
+/// The keychain route's backend module, compiled only on the three
+/// platforms DK-18 names.
 ///
-/// The platform store is the one the keyring crate selects for the
-/// operating system, the macOS Keychain on macOS, the credential store
-/// over DPAPI on Windows, and the Secret Service over the D-Bus
-/// session bus on Linux. Entries are named by the store identifier
-/// under one service name, and keys travel as raw secret bytes.
-pub struct KeychainCustody;
+/// On any other target the keyring dependency itself is absent from
+/// the manifest, so no platform backend can be selected silently. The
+/// keyring crate falls back to its in-memory mock store when no
+/// platform feature is enabled, and a key stored into that mock is
+/// lost the moment the entry value drops, so this seam names no
+/// backend at all where none of the three platforms stands.
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+mod platform {
+    use super::{CustodyError, CustodyLoad, KeyCustody, StoreKey, KEYCHAIN_SERVICE, KEY_LEN};
 
-impl KeychainCustody {
-    /// Build the backend. Reaching the service happens per operation,
-    /// so building the backend cannot fail on a missing service.
-    pub fn new() -> Self {
-        KeychainCustody
+    /// The keychain route's backend, standing behind the keyring crate.
+    ///
+    /// The platform store is the one the keyring crate selects for the
+    /// operating system, the macOS Keychain on macOS, the credential store
+    /// over DPAPI on Windows, and the Secret Service over the D-Bus
+    /// session bus on Linux. Entries are named by the store identifier
+    /// under one service name, and keys travel as raw secret bytes.
+    pub struct KeychainCustody;
+
+    impl KeychainCustody {
+        /// Build the backend. Reaching the service happens per operation,
+        /// so building the backend cannot fail on a missing service.
+        pub fn new() -> Self {
+            KeychainCustody
+        }
+
+        fn entry(store_id: &str) -> Result<keyring::Entry, CustodyError> {
+            keyring::Entry::new(KEYCHAIN_SERVICE, store_id)
+                .map_err(|err| CustodyError::new(err.to_string()))
+        }
     }
 
-    fn entry(store_id: &str) -> Result<keyring::Entry, CustodyError> {
-        keyring::Entry::new(KEYCHAIN_SERVICE, store_id)
-            .map_err(|err| CustodyError::new(err.to_string()))
-    }
-}
-
-impl Default for KeychainCustody {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl KeyCustody for KeychainCustody {
-    fn store_key(&self, store_id: &str, key: &StoreKey) -> Result<(), CustodyError> {
-        Self::entry(store_id)?
-            .set_secret(key.as_bytes())
-            .map_err(|err| CustodyError::new(err.to_string()))
+    impl Default for KeychainCustody {
+        fn default() -> Self {
+            Self::new()
+        }
     }
 
-    fn load_key(&self, store_id: &str) -> CustodyLoad {
-        let entry = match Self::entry(store_id) {
-            Ok(entry) => entry,
-            Err(err) => return CustodyLoad::ServiceFailure(err.to_string()),
-        };
-        match entry.get_secret() {
-            Ok(bytes) => {
-                let array: Result<[u8; KEY_LEN], _> = bytes.as_slice().try_into();
-                match array {
+    impl KeyCustody for KeychainCustody {
+        fn store_key(&self, store_id: &str, key: &StoreKey) -> Result<(), CustodyError> {
+            Self::entry(store_id)?
+                .set_secret(key.as_bytes())
+                .map_err(|err| CustodyError::new(err.to_string()))
+        }
+
+        fn load_key(&self, store_id: &str) -> CustodyLoad {
+            let entry = match Self::entry(store_id) {
+                Ok(entry) => entry,
+                Err(err) => return CustodyLoad::ServiceFailure(err.to_string()),
+            };
+            match entry.get_secret() {
+                Ok(bytes) => {
+                    let array: Result<[u8; KEY_LEN], _> = bytes.as_slice().try_into();
+                    match array {
                     Ok(array) => CustodyLoad::Key(StoreKey::new(array)),
                     Err(_) => CustodyLoad::ServiceFailure(format!(
                         "the keychain entry for this store holds {} bytes and a store key is {KEY_LEN} bytes",
                         bytes.len()
                     )),
                 }
+                }
+                Err(keyring::Error::NoEntry) => CustodyLoad::Absent,
+                Err(err) => CustodyLoad::ServiceFailure(err.to_string()),
             }
-            Err(keyring::Error::NoEntry) => CustodyLoad::Absent,
-            Err(err) => CustodyLoad::ServiceFailure(err.to_string()),
+        }
+
+        fn delete_key(&self, store_id: &str) -> Result<(), CustodyError> {
+            match Self::entry(store_id)?.delete_credential() {
+                Ok(()) => Ok(()),
+                Err(keyring::Error::NoEntry) => Ok(()),
+                Err(err) => Err(CustodyError::new(err.to_string())),
+            }
         }
     }
 
-    fn delete_key(&self, store_id: &str) -> Result<(), CustodyError> {
-        match Self::entry(store_id)?.delete_credential() {
-            Ok(()) => Ok(()),
-            Err(keyring::Error::NoEntry) => Ok(()),
-            Err(err) => Err(CustodyError::new(err.to_string())),
-        }
+    /// Select the platform custody backend for the keychain route.
+    ///
+    /// The choice happens where the backend is built, never where it is
+    /// used, so the store layer above the seam reads the same on every
+    /// platform.
+    pub fn platform_custody() -> Box<dyn KeyCustody> {
+        Box::new(KeychainCustody::new())
     }
 }
 
-/// Select the platform custody backend for the keychain route.
-///
-/// The choice happens where the backend is built, never where it is
-/// used, so the store layer above the seam reads the same on every
-/// platform.
-pub fn platform_custody() -> Box<dyn KeyCustody> {
-    Box::new(KeychainCustody::new())
-}
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+pub use platform::{platform_custody, KeychainCustody};
 
 #[cfg(feature = "custody-fixture")]
 mod fixture {
