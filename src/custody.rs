@@ -66,7 +66,15 @@ impl fmt::Debug for StoreKey {
 
 impl PartialEq for StoreKey {
     fn eq(&self, other: &Self) -> bool {
-        self.as_bytes()[..] == other.as_bytes()[..]
+        // The comparison walks every byte and folds the differences
+        // into one accumulator, so it never exits early on the first
+        // differing byte and its timing says nothing about where two
+        // keys differ.
+        let mut folded = 0u8;
+        for (mine, theirs) in self.as_bytes().iter().zip(other.as_bytes().iter()) {
+            folded |= mine ^ theirs;
+        }
+        folded == 0
     }
 }
 
@@ -144,7 +152,7 @@ pub fn derive_key(passphrase: &[u8], salt: &[u8; SALT_LEN]) -> StoreKey {
     let mut out = Zeroizing::new([0u8; KEY_LEN]);
     argon
         .hash_password_into(passphrase, salt, &mut *out)
-        .expect("the pinned Argon2id parameters are valid");
+        .expect("the Argon2id key derivation failed");
     StoreKey::from_zeroizing(out)
 }
 
@@ -288,9 +296,10 @@ mod fixture {
     ///
     /// The fixture answers each of the three load outcomes the seam
     /// defines, a stored key, an absent key, and a service failure the
-    /// test arms and clears. It is compiled only into the test suite
-    /// behind the custody-fixture feature and is never linked into the
-    /// binary or the library a caller depends on.
+    /// test arms and clears. It is compiled only under the
+    /// custody-fixture feature, a public feature that exists for this
+    /// crate's own tests, and a consumer who enables that feature
+    /// links it. No production code path in this crate constructs it.
     #[derive(Default)]
     pub struct FixtureCustody {
         entries: Mutex<BTreeMap<String, [u8; KEY_LEN]>>,
