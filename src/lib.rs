@@ -577,10 +577,10 @@ fn establish_custody(
 ) -> Result<(Header, StoreKey), Error> {
     match route {
         Route::Keychain => {
-            let mut key_bytes = [0u8; KEY_LEN];
-            getrandom::fill(&mut key_bytes)
+            let mut key_bytes = Zeroizing::new([0u8; KEY_LEN]);
+            getrandom::fill(&mut *key_bytes)
                 .map_err(|_| Error::Io(std::io::Error::other("the random source refused")))?;
-            let key = StoreKey::new(key_bytes);
+            let key = StoreKey::from_zeroizing(key_bytes);
             let store_id = random_hex(32)?;
             unlock.custody.store_key(&store_id, &key).map_err(|_| {
                 Error::Refusal(
