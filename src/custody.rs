@@ -5,11 +5,11 @@
 //! backend either holds the key in the operating system keychain or
 //! derives it from a passphrase on every load. Nothing in this module
 //! reads or writes the store file itself. The envelope that consumes a
-//! loaded key is a later slice. Custody dependent behavior in this
-//! slice is driven through the fixture backend in the test suite, and
-//! the keychain backend is driven once against a machine with no
-//! keychain service running, which DK-24 names as the standing limit
-//! of this layer.
+//! loaded key stands in the envelope module and the store layer of the
+//! crate root. Custody dependent behavior is driven through the
+//! fixture backend in the test suite, and the keychain backend is
+//! driven once against a machine with no keychain service running,
+//! which DK-24 names as the standing limit of this layer.
 
 use std::fmt;
 
@@ -30,6 +30,23 @@ pub const ARGON2_TIME: u32 = 3;
 
 /// The Argon2id lane count pinned by DK-19.
 pub const ARGON2_LANES: u32 = 1;
+
+/// The lowest Argon2id memory cost in kibibytes the reader accepts
+/// under DK-19. A header naming less is corruption under DK-17,
+/// because a weakened header would make every guess cheaper.
+pub const ARGON2_MEMORY_MIN_KIB: u32 = 8_192;
+
+/// The highest Argon2id memory cost in kibibytes the reader accepts
+/// under DK-19. A header naming more is corruption under DK-17,
+/// because a hostile header must not name a derivation the machine
+/// cannot pay.
+pub const ARGON2_MEMORY_MAX_KIB: u32 = 1_048_576;
+
+/// The lowest Argon2id time cost the reader accepts under DK-19.
+pub const ARGON2_TIME_MIN: u32 = 1;
+
+/// The highest Argon2id time cost the reader accepts under DK-19.
+pub const ARGON2_TIME_MAX: u32 = 10;
 
 /// The service name every keychain entry for this crate is stored under.
 pub const KEYCHAIN_SERVICE: &str = "deadbolt";
@@ -146,8 +163,25 @@ pub trait KeyCustody: Send + Sync {
 /// runs on every load, its output is never stored anywhere, and the
 /// salt travels with the envelope header rather than with the service.
 pub fn derive_key(passphrase: &[u8], salt: &[u8; SALT_LEN]) -> StoreKey {
-    let params = Params::new(ARGON2_MEMORY_KIB, ARGON2_TIME, ARGON2_LANES, Some(KEY_LEN))
-        .expect("the pinned Argon2id parameters are valid");
+    derive_key_with_params(passphrase, salt, ARGON2_MEMORY_KIB, ARGON2_TIME)
+}
+
+/// Derive the unlock key at stated Argon2id parameters.
+///
+/// A standing envelope records the parameters its writer used, and
+/// the reader honors the recorded parameters inside the range DK-19
+/// accepts, so opening a store derives at what its header states
+/// rather than at the pinned writer constants. Callers pass only
+/// parameters inside that range, which the envelope reader has
+/// already refused as corruption outside it.
+pub fn derive_key_with_params(
+    passphrase: &[u8],
+    salt: &[u8; SALT_LEN],
+    memory_kib: u32,
+    time: u32,
+) -> StoreKey {
+    let params = Params::new(memory_kib, time, ARGON2_LANES, Some(KEY_LEN))
+        .expect("the Argon2id parameters are valid");
     let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let mut out = Zeroizing::new([0u8; KEY_LEN]);
     argon
