@@ -17,9 +17,26 @@ path = "src/bin/deadbolt.rs"
 name = "codepoint_scan"
 path = "src/bin/codepoint_scan.rs"
 
+[features]
+custody-fixture = []
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 fs2 = "0.4"
 getrandom = "0.3"
+argon2 = "0.5"
+zeroize = "1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3", features = ["windows-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", features = ["sync-secret-service"] }
+
+[dev-dependencies]
+deadbolt = { path = ".", features = ["custody-fixture"] }
