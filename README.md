@@ -14,7 +14,7 @@ Deadbolt is a Rust library crate with a thin command line binary over one local 
 
 The remote seed was verified on 2026-11-02 against the staged seed and its commit is 08a05b881350c6ca5eb8a42af28d25f194c6d039, a parentless commit holding exactly README.md and LICENSE and .gitignore. Setup arrives through a pull request and no work lands on main directly.
 
-The contract lives in CONTRACT.md. The full contract landed as the first build act of this repo in Round 1 slice 1, with obligations DK-1 to DK-14 over the setup obligations S1 to S5, and that slice built the broker core described above. One amendment stands in S2, which names the Rust gate in place of the setup gate under the program language ruling of 2026-11-02.
+The contract lives in CONTRACT.md. The full contract landed as the first build act of this repo in Round 1 slice 1, with obligations DK-1 to DK-14 over the setup obligations S1 to S5, and that slice built the broker core described above. One amendment stands in S2, which names the Rust gate in place of the setup gate under the program language ruling of 2026-11-02. The encryption amendment of Round 2 slice 1 stands in the same file, adding obligations DK-15 to DK-24 over the broker core and amending DK-14 by the replacement paragraph DK-24 carries.
 
 Closed perfection rounds are 1 of 100. A round counts only when a full cycle of work and audit and review and red team and approval has closed, and seeding and setup are not rounds.
 
