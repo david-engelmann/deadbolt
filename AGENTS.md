@@ -56,6 +56,6 @@ Verify claims from the thing itself. A result is read from the file on disk, the
 
 The contract for this repo lives in CONTRACT.md and it defines the obligations this repo must meet. Read CONTRACT.md and the README before changing anything in deadbolt.
 
-Portcullis guards the calls, deadbolt guards the credentials the calls ask for. Deadbolt is the guard for credentials, and its subject is how credentials are held and released to calls that have been admitted. This setup slice establishes the repo and its discipline only, and it claims no brokering behaviour and no feature behaviour of any kind.
+Portcullis guards the calls, deadbolt guards the credentials the calls ask for. Deadbolt is the guard for credentials, and its subject is how credentials are held and released to calls that have been admitted. The broker core landed in Round 1 slice 1, and the encryption slice landed in Round 2 under obligations DK-15 to DK-24.
 
-The full contract is the first build act of this repo and it arrives with the first feature slice, which is a later slice than this setup slice.
+The full contract stood as the first build act of this repo, landing with Round 1 slice 1, and the encryption amendment of Round 2 stands in the same file.
