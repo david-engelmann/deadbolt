@@ -6,9 +6,10 @@
 //! keychain service, so the drive lands in the failure outcome, which
 //! is the outcome DK-24 names as the residue this suite cannot retire.
 
+#[cfg(target_os = "linux")]
+use deadbolt::custody::platform_custody;
 use deadbolt::custody::{
-    derive_key, platform_custody, CustodyLoad, FixtureCustody, KeyCustody, PassphraseCustody,
-    StoreKey,
+    derive_key, CustodyLoad, FixtureCustody, KeyCustody, PassphraseCustody, StoreKey,
 };
 use zeroize::Zeroizing;
 
@@ -169,11 +170,21 @@ fn passphrase_delete_answers_ok_because_nothing_was_stored() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn platform_custody_without_a_service_answers_service_failure() {
-    // This drive is the one DK-24 names. The machine running the suite
-    // has no keychain service behind it, so the platform backend must
-    // answer promptly with the failure outcome, never with absence and
-    // never by panicking or hanging.
+    // This drive is the one DK-24 names, and its premise is a machine
+    // with no keychain service behind it, stated here as an executable
+    // condition and not only as this comment. Where a session bus
+    // address stands in the environment a service may be live, and a
+    // live service answers absence for a missing entry rather than the
+    // failure outcome, or can block on an unlock prompt, so the drive
+    // stands down there instead of failing on a host fact. Where the
+    // premise holds, the platform backend must answer promptly with
+    // the failure outcome, never with absence and never by panicking
+    // or hanging.
+    if std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some() {
+        return;
+    }
     let custody = platform_custody();
     match custody.load_key(STORE_ID) {
         CustodyLoad::ServiceFailure(_) => {}
