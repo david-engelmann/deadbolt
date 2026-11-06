@@ -4,7 +4,7 @@
 //! single JSON document in the deadbolt-state/1 format. Every change
 //! is published by atomic rename under one exclusive advisory lock,
 //! and the state file mode is gated on every open. The obligations
-//! this code answers to are DK-1 to DK-14 in CONTRACT.md.
+//! this code answers to are DK-1 to DK-24 in CONTRACT.md.
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -14,6 +14,8 @@ use std::path::{Path, PathBuf};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+pub mod custody;
 
 pub const FORMAT: &str = "deadbolt-state/1";
 pub const TTL_MIN: u64 = 1;
