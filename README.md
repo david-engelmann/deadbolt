@@ -46,7 +46,7 @@ deadbolt --state quickstart.json grant --credential api-key --scope bucket:read 
 {"expires_at":1794116244,"grant_id":"dac0b16c68979b2bf68b0b283baa7b7e","token":"5aea44dddf7a58eed31a1c0b37b0cf80e9c6ab66179bb4434214fec76784bc1a"}
 ```
 
-The token prints once, in the grant receipt. Nothing else in deadbolt ever prints it, and the state stores only its hash.
+The token prints once, in the grant receipt, and the redeem below carries the token from the receipt above it. Every grant mints a fresh token, so a run of your own prints a different one, and its redeem carries the one its grant printed. Nothing else in deadbolt ever prints it, and the state stores only its hash.
 
 ```
 deadbolt --state quickstart.json redeem --token 5aea44dddf7a58eed31a1c0b37b0cf80e9c6ab66179bb4434214fec76784bc1a --scope bucket:read
@@ -74,7 +74,7 @@ deadbolt --state usage.json grant --credential api-key --scope bucket:read --ttl
 
 ### Redeem
 
-Redeem presents the token and one scope, and prints the value alone when the grant stands live and unexpired for exactly that scope. A time to live stands from 1 to 86400 seconds, counted from the grant.
+Redeem presents the token and one scope, and prints the value alone when the grant stands live and unexpired for exactly that scope. Each redeem in this section carries the token from the grant receipt printed above it. A time to live stands from 1 to 86400 seconds, counted from the grant.
 
 ```
 deadbolt --state usage.json redeem --token 136bc0599d2f0bb079863c5640c10530f14185f786441dd04a9e69a0bc255c65 --scope bucket:read
