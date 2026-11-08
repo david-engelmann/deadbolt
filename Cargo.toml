@@ -2,7 +2,7 @@
 name = "deadbolt"
 version = "0.1.0"
 edition = "2021"
-description = "Secrets brokering for agents, scoped and expiring capability tokens over one local state file"
+description = "A secrets broker for agents, where a credential is enrolled once and tools redeem scoped, expiring capability tokens so the real key never touches the agent process, with the store encrypted on disk under a key the operating system keychain holds and a passphrase route as the fallback."
 license = "MIT"
 
 [lib]
