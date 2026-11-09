@@ -1008,6 +1008,117 @@ pub fn retire(state_path: &Path, unlock: &Unlock, name: &str, now: i64) -> Resul
     Ok(ended)
 }
 
+/// Rotate a credential onto a successor in one act, DK-25.
+///
+/// The act enrolls the successor, ends every grant that stands
+/// live against the predecessor with the stamp and the reason of
+/// DK-4, and removes the predecessor, under the one lock with one
+/// publish, so no state of the store shows either half of the
+/// rotation without the other. Returns how many grants the act
+/// ended, as retire returns its count. Rotation mints no grant
+/// and no token, and authorisation after the act is by grant
+/// alone.
+pub fn rotate(
+    state_path: &Path,
+    unlock: &Unlock,
+    predecessor: &str,
+    successor: &str,
+    value: &str,
+    scopes: &[Scope],
+    now: i64,
+) -> Result<usize, Error> {
+    check_name("credential name", predecessor)?;
+    check_name("credential name", successor)?;
+    check_value(value)?;
+    if scopes.is_empty() {
+        return Err(Error::Caller(
+            "a rotation must name at least one scope".to_string(),
+        ));
+    }
+    for scope in scopes {
+        check_scope(scope)?;
+        if scopes.iter().filter(|other| *other == scope).count() > 1 {
+            return Err(Error::Caller(
+                "a rotation must not repeat a scope".to_string(),
+            ));
+        }
+    }
+    check_instant(now)?;
+    let mut session = Session::open(state_path, unlock, now)?;
+    if !session
+        .state
+        .credentials
+        .iter()
+        .any(|credential| credential.name == predecessor)
+    {
+        session.record_refusal(
+            now,
+            "rotate",
+            Some(predecessor),
+            None,
+            None,
+            "refused, unknown credential".to_string(),
+        )?;
+        return Err(Error::Refusal(format!(
+            "rotate refused, no credential named {predecessor} stands"
+        )));
+    }
+    if session
+        .state
+        .credentials
+        .iter()
+        .any(|credential| credential.name == successor)
+    {
+        session.record_refusal(
+            now,
+            "rotate",
+            Some(predecessor),
+            None,
+            None,
+            "refused, name already stands".to_string(),
+        )?;
+        return Err(Error::Refusal(format!(
+            "rotate refused, a credential named {successor} already stands"
+        )));
+    }
+    let mut ended = 0;
+    for grant in session.state.grants.iter_mut() {
+        if grant.credential == predecessor && grant.ended_at.is_none() && now < grant.expires_at {
+            grant.ended_at = Some(now);
+            grant.end_reason = Some("retired".to_string());
+            ended += 1;
+        }
+    }
+    session.state.credentials.push(Credential {
+        name: successor.to_string(),
+        value: value.to_string(),
+        scopes: scopes.to_vec(),
+        enrolled_at: now,
+    });
+    session
+        .state
+        .credentials
+        .retain(|credential| credential.name != predecessor);
+    session.state.record(
+        now,
+        "enroll",
+        Some(successor),
+        None,
+        None,
+        format!("enrolled, rotation of {predecessor}"),
+    );
+    session.state.record(
+        now,
+        "retire",
+        Some(predecessor),
+        None,
+        None,
+        format!("retired, rotation to {successor}"),
+    );
+    session.publish()?;
+    Ok(ended)
+}
+
 /// Grant one scope of one credential to a caller, DK-5 and DK-6.
 pub fn grant(
     state_path: &Path,
