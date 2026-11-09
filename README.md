@@ -16,6 +16,8 @@ SYNTHETIC-TEST-VALUE-api-key
 
 Install from a clean checkout with Cargo. The checkout ships two binaries, and the install names the deadbolt binary on its own because a shared scanner binary of the same name from a sibling repo blocks a plain install of every binary at once.
 
+On Linux the build also needs the libdbus-1 development package, libdbus-1-dev, and pkg-config, the two the workflow installs before its gate.
+
 ```
 git clone https://github.com/david-engelmann/deadbolt.git
 cd deadbolt
@@ -150,7 +152,7 @@ What does not stand proven. The keychain route is verified at the custody seam a
 
 What is not built. Deadbolt has no daemon, no network service, and no Python binding, and the binding absence is by design. Nothing watches the state file, and a grant is judged at the instant a redeem presents it, so expiry needs no timer.
 
-Closed perfection rounds are 2 of 100. A round counts only when a full cycle of work and audit and review and red team and approval has closed, and seeding and setup are not rounds.
+Closed perfection rounds are 3 of 100. A round counts only when a full cycle of work and audit and review and red team and approval has closed, and seeding and setup are not rounds.
 
 The contract lives in CONTRACT.md, where obligations DK-1 to DK-25 state the broker semantics, the limits, and the custody and envelope rules.
 
