@@ -14,7 +14,7 @@
 use std::fmt;
 
 use argon2::{Algorithm, Argon2, Params, Version};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 /// The length in bytes of a store unlock key.
 pub const KEY_LEN: usize = 32;
@@ -190,6 +190,31 @@ pub fn derive_key_with_params(
     StoreKey::from_zeroizing(out)
 }
 
+/// Convert a secret the keyring crate returned into a store key,
+/// wiping the plain copy the crate API hands back.
+///
+/// The get_secret call of the keyring crate returns the secret as a
+/// plain Vec of bytes. This conversion copies the bytes into a
+/// zeroizing array and zeroes the source Vec in place, and the wipe
+/// runs on the wrong length path as well, because bytes of the
+/// wrong length under a store entry are still key material standing
+/// in the clear. It answers none when the length differs from the
+/// key length, and the caller captures the length before the call
+/// so the service failure wording that names the held byte count
+/// stands word for word. DK-18 states the discipline this brings
+/// the load path under, that keys cross the seam in a zeroizing
+/// type and are wiped on drop.
+pub fn store_key_from_secret(secret: &mut Vec<u8>) -> Option<StoreKey> {
+    if secret.len() != KEY_LEN {
+        secret.zeroize();
+        return None;
+    }
+    let mut key = Zeroizing::new([0u8; KEY_LEN]);
+    key.copy_from_slice(secret.as_slice());
+    secret.zeroize();
+    Some(StoreKey::from_zeroizing(key))
+}
+
 /// The passphrase route's backend, binding one passphrase to one salt.
 ///
 /// Loading derives the key again, storing checks an offered key
@@ -239,7 +264,10 @@ impl KeyCustody for PassphraseCustody {
 /// backend at all where none of the three platforms stands.
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 mod platform {
-    use super::{CustodyError, CustodyLoad, KeyCustody, StoreKey, KEYCHAIN_SERVICE, KEY_LEN};
+    use super::{
+        store_key_from_secret, CustodyError, CustodyLoad, KeyCustody, StoreKey, KEYCHAIN_SERVICE,
+        KEY_LEN,
+    };
 
     /// The keychain route's backend, standing behind the keyring crate.
     ///
@@ -282,15 +310,14 @@ mod platform {
                 Err(err) => return CustodyLoad::ServiceFailure(err.to_string()),
             };
             match entry.get_secret() {
-                Ok(bytes) => {
-                    let array: Result<[u8; KEY_LEN], _> = bytes.as_slice().try_into();
-                    match array {
-                    Ok(array) => CustodyLoad::Key(StoreKey::new(array)),
-                    Err(_) => CustodyLoad::ServiceFailure(format!(
-                        "the keychain entry for this store holds {} bytes and a store key is {KEY_LEN} bytes",
-                        bytes.len()
-                    )),
-                }
+                Ok(mut bytes) => {
+                    let held = bytes.len();
+                    match store_key_from_secret(&mut bytes) {
+                        Some(key) => CustodyLoad::Key(key),
+                        None => CustodyLoad::ServiceFailure(format!(
+                            "the keychain entry for this store holds {held} bytes and a store key is {KEY_LEN} bytes"
+                        )),
+                    }
                 }
                 Err(keyring::Error::NoEntry) => CustodyLoad::Absent,
                 Err(err) => CustodyLoad::ServiceFailure(err.to_string()),

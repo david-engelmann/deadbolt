@@ -9,7 +9,8 @@
 #[cfg(target_os = "linux")]
 use deadbolt::custody::platform_custody;
 use deadbolt::custody::{
-    derive_key, CustodyLoad, FixtureCustody, KeyCustody, PassphraseCustody, StoreKey,
+    derive_key, store_key_from_secret, CustodyLoad, FixtureCustody, KeyCustody, PassphraseCustody,
+    StoreKey,
 };
 use zeroize::Zeroizing;
 
@@ -190,4 +191,20 @@ fn platform_custody_without_a_service_answers_service_failure() {
         CustodyLoad::ServiceFailure(_) => {}
         other => panic!("expected a service failure with no service running, got {other:?}"),
     }
+}
+
+#[test]
+fn secret_conversion_zeroes_the_source_buffer() {
+    let expected = sample_key();
+    let mut secret = expected.as_bytes().to_vec();
+    let key = store_key_from_secret(&mut secret).expect("a key length buffer converts");
+    assert_eq!(key, expected);
+    assert!(secret.iter().all(|byte| *byte == 0));
+}
+
+#[test]
+fn secret_conversion_refuses_a_wrong_length_and_still_zeroes() {
+    let mut secret = vec![0xa5u8; 16];
+    assert!(store_key_from_secret(&mut secret).is_none());
+    assert!(secret.iter().all(|byte| *byte == 0));
 }
