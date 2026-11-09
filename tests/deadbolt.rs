@@ -1901,6 +1901,55 @@ fn rotation_refusals_name_their_reasons_and_record_one_entry() {
 }
 
 #[test]
+fn rotation_to_the_same_name_refuses_and_leaves_the_predecessor_untouched() {
+    let dir = test_dir("rotate-same-name");
+    let h = Harness::new();
+    let state = dir.join("state.json");
+    enroll_a(&h, &state);
+    let receipt =
+        deadbolt::grant(&state, &h.open(), "cache-key", &read_scope(), 600, None, T0).unwrap();
+    let err = deadbolt::rotate(
+        &state,
+        &h.open(),
+        "cache-key",
+        "cache-key",
+        VALUE_B,
+        &[read_scope()],
+        T0 + 10,
+    )
+    .unwrap_err();
+    assert!(matches!(err, Error::Refusal(_)), "{err}");
+    assert_eq!(
+        err.to_string(),
+        "rotate refused, a credential named cache-key already stands"
+    );
+    let entries = deadbolt::audit(&state, &h.open(), T0).unwrap();
+    assert_eq!(entries.len(), 3);
+    let refusal = &entries[2];
+    assert_eq!(refusal.kind, "rotate");
+    assert_eq!(refusal.credential.as_deref(), Some("cache-key"));
+    assert_eq!(refusal.outcome, "refused, name already stands");
+    assert_eq!(
+        deadbolt::redeem(&state, &h.open(), &receipt.token, &read_scope(), T0 + 20).unwrap(),
+        VALUE_A
+    );
+    let json = document_json(&h, &state);
+    let names: Vec<&str> = json["credentials"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|credential| credential["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["cache-key"]);
+    let predecessor = &json["credentials"].as_array().unwrap()[0];
+    assert_eq!(predecessor["value"], VALUE_A);
+    assert_eq!(predecessor["scopes"].as_array().unwrap().len(), 2);
+    let grant = &json["grants"].as_array().unwrap()[0];
+    assert!(grant["ended_at"].is_null());
+    assert!(grant["end_reason"].is_null());
+}
+
+#[test]
 fn rotation_shape_errors_are_caller_errors_and_record_nothing() {
     let dir = test_dir("rotate-shapes");
     let h = Harness::new();
