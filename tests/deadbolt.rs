@@ -1943,7 +1943,10 @@ fn rotation_to_the_same_name_refuses_and_leaves_the_predecessor_untouched() {
     assert_eq!(names, ["cache-key"]);
     let predecessor = &json["credentials"].as_array().unwrap()[0];
     assert_eq!(predecessor["value"], VALUE_A);
-    assert_eq!(predecessor["scopes"].as_array().unwrap().len(), 2);
+    let scopes = predecessor["scopes"].as_array().unwrap();
+    assert_eq!(scopes.len(), 2);
+    assert!(scopes.contains(&serde_json::json!({"resource": "bucket", "action": "read"})));
+    assert!(scopes.contains(&serde_json::json!({"resource": "bucket", "action": "write"})));
     let grant = &json["grants"].as_array().unwrap()[0];
     assert!(grant["ended_at"].is_null());
     assert!(grant["end_reason"].is_null());
