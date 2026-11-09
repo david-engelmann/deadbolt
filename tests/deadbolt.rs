@@ -22,6 +22,8 @@ use deadbolt::{Error, PassphraseSource, RedeemRefusal, Route, Scope, Unlock, Zer
 
 const VALUE_A: &str = "SYNTHETIC-TEST-VALUE-alpha-0001";
 const VALUE_B: &str = "SYNTHETIC-TEST-VALUE-beta-0002";
+const VALUE_C: &str = "SYNTHETIC-TEST-VALUE-gamma-0003";
+const VALUE_D: &str = "SYNTHETIC-TEST-VALUE-delta-0004";
 const STORE_PASSPHRASE: &str = "SYNTHETIC-TEST-VALUE-store-passphrase";
 const CLI_PASSPHRASE: &str = "SYNTHETIC-TEST-VALUE-cli-passphrase";
 const T0: i64 = 1_700_000_000;
@@ -1590,4 +1592,508 @@ fn cli_filesystem_failure_names_the_path_and_exits_2() {
         "{}",
         out.stderr
     );
+}
+
+#[test]
+fn rotation_links_successor_to_predecessor_in_the_audit() {
+    let dir = test_dir("rotate-link");
+    let h = Harness::new();
+    let state = dir.join("state.json");
+    deadbolt::enroll(
+        &state,
+        &h.creating(),
+        "alpha-key",
+        VALUE_A,
+        &[read_scope(), scope("bucket", "write")],
+        T0,
+    )
+    .unwrap();
+    deadbolt::enroll(&state, &h.open(), "beta-key", VALUE_B, &[read_scope()], T0).unwrap();
+    deadbolt::enroll(
+        &state,
+        &h.open(),
+        "cache-key",
+        VALUE_C,
+        &[scope("vault", "read")],
+        T0,
+    )
+    .unwrap();
+    deadbolt::grant(&state, &h.open(), "alpha-key", &read_scope(), 600, None, T0).unwrap();
+    deadbolt::grant(
+        &state,
+        &h.open(),
+        "cache-key",
+        &scope("vault", "read"),
+        600,
+        None,
+        T0,
+    )
+    .unwrap();
+    let ended = deadbolt::rotate(
+        &state,
+        &h.open(),
+        "cache-key",
+        "vault-key",
+        VALUE_D,
+        &[scope("vault", "read"), scope("vault", "write")],
+        T0 + 10,
+    )
+    .unwrap();
+    assert_eq!(ended, 1);
+    let entries = deadbolt::audit(&state, &h.open(), T0).unwrap();
+    let kinds: Vec<&str> = entries.iter().map(|e| e.kind.as_str()).collect();
+    assert_eq!(
+        kinds,
+        ["enroll", "enroll", "enroll", "grant", "grant", "enroll", "retire"]
+    );
+    for (index, entry) in entries.iter().enumerate() {
+        assert_eq!(entry.seq, index as u64 + 1);
+    }
+    let link = &entries[5];
+    assert_eq!(link.credential.as_deref(), Some("vault-key"));
+    assert_eq!(link.outcome, "enrolled, rotation of cache-key");
+    assert_eq!(link.at, T0 + 10);
+    assert!(link.resource.is_none() && link.action.is_none() && link.run_id.is_none());
+    let close = &entries[6];
+    assert_eq!(close.credential.as_deref(), Some("cache-key"));
+    assert_eq!(close.outcome, "retired, rotation to vault-key");
+    assert_eq!(close.at, T0 + 10);
+    let json = document_json(&h, &state);
+    let names: Vec<&str> = json["credentials"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|credential| credential["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["alpha-key", "beta-key", "vault-key"]);
+    let successor = json["credentials"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|credential| credential["name"] == "vault-key")
+        .unwrap();
+    assert_eq!(successor["value"], VALUE_D);
+    assert_eq!(successor["scopes"].as_array().unwrap().len(), 2);
+    let ended_grant = json["grants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|grant| grant["credential"] == "cache-key")
+        .unwrap();
+    assert_eq!(ended_grant["ended_at"], T0 + 10);
+    assert_eq!(ended_grant["end_reason"], "retired");
+    let standing_grant = json["grants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|grant| grant["credential"] == "alpha-key")
+        .unwrap();
+    assert!(standing_grant["ended_at"].is_null());
+    let receipt = deadbolt::grant(
+        &state,
+        &h.open(),
+        "vault-key",
+        &scope("vault", "read"),
+        600,
+        None,
+        T0 + 20,
+    )
+    .unwrap();
+    assert_eq!(
+        deadbolt::redeem(
+            &state,
+            &h.open(),
+            &receipt.token,
+            &scope("vault", "read"),
+            T0 + 21
+        )
+        .unwrap(),
+        VALUE_D
+    );
+    let receipt = deadbolt::grant(
+        &state,
+        &h.open(),
+        "alpha-key",
+        &read_scope(),
+        600,
+        None,
+        T0 + 20,
+    )
+    .unwrap();
+    assert_eq!(
+        deadbolt::redeem(&state, &h.open(), &receipt.token, &read_scope(), T0 + 21).unwrap(),
+        VALUE_A
+    );
+}
+
+#[test]
+fn rotation_ends_live_grants_and_their_tokens_answer_revoked() {
+    let dir = test_dir("rotate-revoked");
+    let h = Harness::new();
+    let state = dir.join("state.json");
+    enroll_a(&h, &state);
+    let receipt =
+        deadbolt::grant(&state, &h.open(), "cache-key", &read_scope(), 600, None, T0).unwrap();
+    assert_eq!(
+        deadbolt::redeem(&state, &h.open(), &receipt.token, &read_scope(), T0 + 10).unwrap(),
+        VALUE_A
+    );
+    let ended = deadbolt::rotate(
+        &state,
+        &h.open(),
+        "cache-key",
+        "successor-key",
+        VALUE_B,
+        &[read_scope()],
+        T0 + 20,
+    )
+    .unwrap();
+    assert_eq!(ended, 1);
+    let err =
+        deadbolt::redeem(&state, &h.open(), &receipt.token, &read_scope(), T0 + 30).unwrap_err();
+    assert!(
+        matches!(err, Error::Redeem(RedeemRefusal::Revoked)),
+        "{err}"
+    );
+    let json = document_json(&h, &state);
+    let grant = &json["grants"].as_array().unwrap()[0];
+    assert_eq!(grant["ended_at"], T0 + 20);
+    assert_eq!(grant["end_reason"], "retired");
+}
+
+#[test]
+fn rotation_leaves_expired_grants_unended_and_answering_expired() {
+    let dir = test_dir("rotate-expired");
+    let h = Harness::new();
+    let state = dir.join("state.json");
+    enroll_a(&h, &state);
+    let short =
+        deadbolt::grant(&state, &h.open(), "cache-key", &read_scope(), 60, None, T0).unwrap();
+    let _long =
+        deadbolt::grant(&state, &h.open(), "cache-key", &read_scope(), 600, None, T0).unwrap();
+    let ended = deadbolt::rotate(
+        &state,
+        &h.open(),
+        "cache-key",
+        "successor-key",
+        VALUE_B,
+        &[read_scope()],
+        T0 + 120,
+    )
+    .unwrap();
+    assert_eq!(ended, 1);
+    let json = document_json(&h, &state);
+    let expired = json["grants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|grant| grant["expires_at"] == T0 + 60)
+        .unwrap();
+    assert!(expired["ended_at"].is_null());
+    assert!(expired["end_reason"].is_null());
+    let err =
+        deadbolt::redeem(&state, &h.open(), &short.token, &read_scope(), T0 + 120).unwrap_err();
+    assert!(
+        matches!(err, Error::Redeem(RedeemRefusal::Expired)),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_failed_rotation_leaves_the_predecessor_standing_and_redeeming() {
+    let dir = test_dir("rotate-failed");
+    let h = Harness::new();
+    let state = dir.join("state.json");
+    enroll_a(&h, &state);
+    deadbolt::enroll(&state, &h.open(), "other", VALUE_B, &[read_scope()], T0).unwrap();
+    let receipt =
+        deadbolt::grant(&state, &h.open(), "cache-key", &read_scope(), 600, None, T0).unwrap();
+    let err = deadbolt::rotate(
+        &state,
+        &h.open(),
+        "cache-key",
+        "other",
+        VALUE_B,
+        &[read_scope()],
+        T0 + 10,
+    )
+    .unwrap_err();
+    assert!(matches!(err, Error::Refusal(_)), "{err}");
+    assert_eq!(
+        err.to_string(),
+        "rotate refused, a credential named other already stands"
+    );
+    assert_eq!(
+        deadbolt::redeem(&state, &h.open(), &receipt.token, &read_scope(), T0 + 20).unwrap(),
+        VALUE_A
+    );
+    let json = document_json(&h, &state);
+    let predecessor = json["credentials"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|credential| credential["name"] == "cache-key")
+        .unwrap();
+    assert_eq!(predecessor["value"], VALUE_A);
+    assert_eq!(predecessor["scopes"].as_array().unwrap().len(), 2);
+    let grant = &json["grants"].as_array().unwrap()[0];
+    assert!(grant["ended_at"].is_null());
+    assert!(grant["end_reason"].is_null());
+}
+
+#[test]
+fn rotation_refusals_name_their_reasons_and_record_one_entry() {
+    let dir = test_dir("rotate-refusals");
+    let h = Harness::new();
+    let state = dir.join("state.json");
+    enroll_a(&h, &state);
+    let err = deadbolt::rotate(
+        &state,
+        &h.open(),
+        "ghost",
+        "new-key",
+        VALUE_B,
+        &[read_scope()],
+        T0 + 1,
+    )
+    .unwrap_err();
+    assert!(matches!(err, Error::Refusal(_)), "{err}");
+    assert_eq!(
+        err.to_string(),
+        "rotate refused, no credential named ghost stands"
+    );
+    let entries = deadbolt::audit(&state, &h.open(), T0).unwrap();
+    assert_eq!(entries.len(), 2);
+    let refusal = &entries[1];
+    assert_eq!(refusal.kind, "rotate");
+    assert_eq!(refusal.credential.as_deref(), Some("ghost"));
+    assert_eq!(refusal.outcome, "refused, unknown credential");
+    deadbolt::enroll(&state, &h.open(), "taken", VALUE_B, &[read_scope()], T0 + 2).unwrap();
+    let err = deadbolt::rotate(
+        &state,
+        &h.open(),
+        "cache-key",
+        "taken",
+        VALUE_B,
+        &[read_scope()],
+        T0 + 3,
+    )
+    .unwrap_err();
+    assert!(matches!(err, Error::Refusal(_)), "{err}");
+    assert_eq!(
+        err.to_string(),
+        "rotate refused, a credential named taken already stands"
+    );
+    let entries = deadbolt::audit(&state, &h.open(), T0).unwrap();
+    assert_eq!(entries.len(), 4);
+    let refusal = &entries[3];
+    assert_eq!(refusal.kind, "rotate");
+    assert_eq!(refusal.credential.as_deref(), Some("cache-key"));
+    assert_eq!(refusal.outcome, "refused, name already stands");
+    let json = document_json(&h, &state);
+    let names: Vec<&str> = json["credentials"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|credential| credential["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["cache-key", "taken"]);
+}
+
+#[test]
+fn rotation_to_the_same_name_refuses_and_leaves_the_predecessor_untouched() {
+    let dir = test_dir("rotate-same-name");
+    let h = Harness::new();
+    let state = dir.join("state.json");
+    enroll_a(&h, &state);
+    let receipt =
+        deadbolt::grant(&state, &h.open(), "cache-key", &read_scope(), 600, None, T0).unwrap();
+    let err = deadbolt::rotate(
+        &state,
+        &h.open(),
+        "cache-key",
+        "cache-key",
+        VALUE_B,
+        &[read_scope()],
+        T0 + 10,
+    )
+    .unwrap_err();
+    assert!(matches!(err, Error::Refusal(_)), "{err}");
+    assert_eq!(
+        err.to_string(),
+        "rotate refused, a credential named cache-key already stands"
+    );
+    let entries = deadbolt::audit(&state, &h.open(), T0).unwrap();
+    assert_eq!(entries.len(), 3);
+    let refusal = &entries[2];
+    assert_eq!(refusal.kind, "rotate");
+    assert_eq!(refusal.credential.as_deref(), Some("cache-key"));
+    assert_eq!(refusal.outcome, "refused, name already stands");
+    assert_eq!(
+        deadbolt::redeem(&state, &h.open(), &receipt.token, &read_scope(), T0 + 20).unwrap(),
+        VALUE_A
+    );
+    let json = document_json(&h, &state);
+    let names: Vec<&str> = json["credentials"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|credential| credential["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["cache-key"]);
+    let predecessor = &json["credentials"].as_array().unwrap()[0];
+    assert_eq!(predecessor["value"], VALUE_A);
+    let scopes = predecessor["scopes"].as_array().unwrap();
+    assert_eq!(scopes.len(), 2);
+    assert!(scopes.contains(&serde_json::json!({"resource": "bucket", "action": "read"})));
+    assert!(scopes.contains(&serde_json::json!({"resource": "bucket", "action": "write"})));
+    let grant = &json["grants"].as_array().unwrap()[0];
+    assert!(grant["ended_at"].is_null());
+    assert!(grant["end_reason"].is_null());
+}
+
+#[test]
+fn rotation_shape_errors_are_caller_errors_and_record_nothing() {
+    let dir = test_dir("rotate-shapes");
+    let h = Harness::new();
+    let state = dir.join("state.json");
+    enroll_a(&h, &state);
+    let attempts: Vec<(&str, &str, Vec<Scope>)> = vec![
+        ("bad name", VALUE_B, vec![read_scope()]),
+        ("", VALUE_B, vec![read_scope()]),
+        ("successor-key", VALUE_B, vec![]),
+        ("successor-key", VALUE_B, vec![read_scope(), read_scope()]),
+        ("successor-key", "", vec![read_scope()]),
+        ("successor-key", "two\nlines", vec![read_scope()]),
+    ];
+    for (successor, value, scopes) in &attempts {
+        let err = deadbolt::rotate(
+            &state,
+            &h.open(),
+            "cache-key",
+            successor,
+            value,
+            scopes,
+            T0 + 1,
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::Caller(_)), "{err}");
+    }
+    let entries = deadbolt::audit(&state, &h.open(), T0).unwrap();
+    assert_eq!(entries.len(), 1);
+    let receipt = deadbolt::grant(
+        &state,
+        &h.open(),
+        "cache-key",
+        &read_scope(),
+        600,
+        None,
+        T0 + 2,
+    )
+    .unwrap();
+    assert_eq!(
+        deadbolt::redeem(&state, &h.open(), &receipt.token, &read_scope(), T0 + 3).unwrap(),
+        VALUE_A
+    );
+}
+
+#[test]
+fn cli_rotation_round_trip_and_its_output() {
+    let dir = test_dir("cli-rotate");
+    let state = dir.join("state.json");
+    let state_arg = state.to_string_lossy().into_owned();
+    let (token, _grant_id) = cli_enroll_and_grant(&dir);
+    let successor_file = dir.join("value2.txt");
+    std::fs::write(&successor_file, format!("{VALUE_B}\n")).unwrap();
+    let successor_arg = successor_file.to_string_lossy().into_owned();
+    let out = run_cli_pp(&[
+        "--state",
+        &state_arg,
+        "rotate",
+        "--name",
+        "cache-key",
+        "--new-name",
+        "successor-key",
+        "--value-file",
+        &successor_arg,
+        "--scope",
+        "bucket:read",
+    ]);
+    assert_eq!(out.status, 0, "{}", out.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(parsed["rotated"], "cache-key");
+    assert_eq!(parsed["successor"], "successor-key");
+    assert_eq!(parsed["grants_ended"], 1);
+    let out = run_cli_pp(&[
+        "--state",
+        &state_arg,
+        "grant",
+        "--credential",
+        "successor-key",
+        "--scope",
+        "bucket:read",
+        "--ttl",
+        "600",
+    ]);
+    assert_eq!(out.status, 0, "{}", out.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    let new_token = parsed["token"].as_str().unwrap().to_string();
+    let out = run_cli_pp(&[
+        "--state",
+        &state_arg,
+        "redeem",
+        "--token",
+        &new_token,
+        "--scope",
+        "bucket:read",
+    ]);
+    assert_eq!(out.status, 0, "{}", out.stderr);
+    assert_eq!(out.stdout, format!("{VALUE_B}\n"));
+    let out = run_cli_pp(&[
+        "--state",
+        &state_arg,
+        "redeem",
+        "--token",
+        &token,
+        "--scope",
+        "bucket:read",
+    ]);
+    assert_eq!(out.status, 1, "{}", out.stderr);
+    assert!(out.stderr.contains("revoked"), "{}", out.stderr);
+    let out = run_cli_pp(&[
+        "--state",
+        &state_arg,
+        "rotate",
+        "--name",
+        "cache-key",
+        "--new-name",
+        "third-key",
+        "--value-file",
+        &successor_arg,
+        "--scope",
+        "bucket:read",
+    ]);
+    assert_eq!(out.status, 1, "{}", out.stderr);
+    assert!(
+        out.stderr
+            .contains("rotate refused, no credential named cache-key stands"),
+        "{}",
+        out.stderr
+    );
+    let out = run_cli_pp(&["--state", &state_arg, "audit"]);
+    assert_eq!(out.status, 0, "{}", out.stderr);
+    let lines: Vec<serde_json::Value> = out
+        .stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let pair = lines
+        .windows(2)
+        .find(|pair| pair[0]["outcome"] == "enrolled, rotation of cache-key")
+        .expect("the audit shows the rotation pair");
+    assert_eq!(pair[0]["kind"], "enroll");
+    assert_eq!(pair[0]["credential"], "successor-key");
+    assert_eq!(pair[1]["kind"], "retire");
+    assert_eq!(pair[1]["credential"], "cache-key");
+    assert_eq!(pair[1]["outcome"], "retired, rotation to successor-key");
 }
