@@ -3090,7 +3090,6 @@ fn pre_mark_documents_read_at_incarnation_one_and_render_without_the_key() {
     .unwrap();
     assert_eq!(ended, 1);
     assert_eq!(stood_up, 2);
-    let text = document_text(&h, &state);
     let json = document_json(&h, &state);
     assert_eq!(json["credentials"].as_array().unwrap()[0]["incarnation"], 2);
 
