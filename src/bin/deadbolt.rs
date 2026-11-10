@@ -234,7 +234,7 @@ fn read_value_file(path: &str) -> Result<String, Error> {
 fn run(args: &[String]) -> Result<String, Error> {
     if args.len() < 3 || args[0] != "--state" {
         return Err(caller(
-            "usage, deadbolt --state PATH with an optional --route keychain or passphrase and then one of enroll, retire, rotate, grant, redeem, revoke, cutoff, audit",
+            "usage, deadbolt --state PATH with an optional --route keychain or passphrase and then one of enroll, retire, rotate, replace, grant, redeem, revoke, cutoff, audit",
         ));
     }
     let state = PathBuf::from(&args[1]);
@@ -252,7 +252,7 @@ fn run(args: &[String]) -> Result<String, Error> {
         index += 2;
     }
     let command = args.get(index).map(String::as_str).ok_or_else(|| {
-        caller("the command is not one of enroll, retire, rotate, grant, redeem, revoke, cutoff, audit")
+        caller("the command is not one of enroll, retire, rotate, replace, grant, redeem, revoke, cutoff, audit")
     })?;
     let rest = &args[index + 1..];
     let now = now_seconds();
@@ -308,6 +308,26 @@ fn run(args: &[String]) -> Result<String, Error> {
             Ok(format!(
                 "{}\n",
                 serde_json::json!({"rotated": name, "successor": new_name, "grants_ended": ended})
+            ))
+        }
+        "replace" => {
+            let options = Options::parse(rest, &["--name", "--value-file", "--scope"], &[])?;
+            let name = options.required("--name")?;
+            let value_file = options.required("--value-file")?;
+            let scope_texts = options.many("--scope");
+            if scope_texts.is_empty() {
+                return Err(caller("replace names at least one scope"));
+            }
+            let mut scopes = Vec::new();
+            for text in &scope_texts {
+                scopes.push(parse_scope(text)?);
+            }
+            let value = read_value_file(&value_file)?;
+            let (ended, incarnation) =
+                deadbolt::replace(&state, &unlock, &name, &value, &scopes, now)?;
+            Ok(format!(
+                "{}\n",
+                serde_json::json!({"replaced": name, "incarnation": incarnation, "grants_ended": ended})
             ))
         }
         "grant" => {
@@ -371,7 +391,7 @@ fn run(args: &[String]) -> Result<String, Error> {
             Ok(out)
         }
         _ => Err(caller(
-            "the command is not one of enroll, retire, rotate, grant, redeem, revoke, cutoff, audit",
+            "the command is not one of enroll, retire, rotate, replace, grant, redeem, revoke, cutoff, audit",
         )),
     }
 }

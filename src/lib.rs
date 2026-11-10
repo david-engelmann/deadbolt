@@ -6,7 +6,7 @@
 //! key the custody module holds. Every change is published by atomic
 //! rename under one exclusive advisory lock, and the state file mode
 //! is gated on every open. The obligations this code answers to are
-//! DK-1 to DK-25 in CONTRACT.md.
+//! DK-1 to DK-27 in CONTRACT.md.
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -196,6 +196,22 @@ pub struct AuditEntry {
     pub outcome: String,
 }
 
+/// The incarnation a record written before the mark existed
+/// reads at, DK-27. The count starts at 1, so the default is an
+/// explicit function and never the u64 default of 0, which the
+/// reader refuses as corruption.
+fn incarnation_one() -> u64 {
+    1
+}
+
+/// Whether an incarnation skips rendering its key, DK-27. The
+/// key stands exactly when the value stands above 1, so the key
+/// is skipped while the value stands at 1, and a document no
+/// replacement has touched renders without the key anywhere.
+fn incarnation_stands_at_one(incarnation: &u64) -> bool {
+    *incarnation <= 1
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Credential {
@@ -203,6 +219,11 @@ struct Credential {
     value: String,
     scopes: Vec<Scope>,
     enrolled_at: i64,
+    #[serde(
+        default = "incarnation_one",
+        skip_serializing_if = "incarnation_stands_at_one"
+    )]
+    incarnation: u64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -218,6 +239,11 @@ struct Grant {
     expires_at: i64,
     ended_at: Option<i64>,
     end_reason: Option<String>,
+    #[serde(
+        default = "incarnation_one",
+        skip_serializing_if = "incarnation_stands_at_one"
+    )]
+    incarnation: u64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -295,6 +321,12 @@ fn parse_state(text: &str) -> Result<State, Error> {
             )));
         }
         names.push(credential.name.as_str());
+        if credential.incarnation == 0 {
+            return Err(Error::Corrupt(format!(
+                "the credential {} carries an incarnation of 0 in the state file",
+                credential.name
+            )));
+        }
         check_stored_instant(credential.enrolled_at)?;
         if credential.scopes.is_empty() {
             return Err(Error::Corrupt(format!(
@@ -343,6 +375,11 @@ fn parse_state(text: &str) -> Result<State, Error> {
             ));
         }
         hashes.push(grant.token_hash.as_str());
+        if grant.incarnation == 0 {
+            return Err(Error::Corrupt(
+                "a grant in the state file carries an incarnation of 0".to_string(),
+            ));
+        }
         check_stored_instant(grant.granted_at)?;
         check_stored_instant(grant.expires_at)?;
         if grant.expires_at <= grant.granted_at {
@@ -352,12 +389,35 @@ fn parse_state(text: &str) -> Result<State, Error> {
         }
         match (&grant.ended_at, &grant.end_reason) {
             (None, None) => {
-                if grant.expires_at > document_floor && !names.contains(&grant.credential.as_str())
-                {
-                    return Err(Error::Corrupt(
-                        "a live grant in the state file names a credential that does not stand"
-                            .to_string(),
-                    ));
+                if grant.expires_at > document_floor {
+                    // A live grant is checked against the name and
+                    // the incarnation together, DK-27. A grant that
+                    // stands ended, or that stands dead by expiry at
+                    // the document floor, may carry any incarnation
+                    // from 1 whether its credential stands or does
+                    // not stand, and no upper bound stands on it,
+                    // because a name retired and enrolled again
+                    // begins again at 1 beside its ended grants.
+                    match state
+                        .credentials
+                        .iter()
+                        .find(|credential| credential.name == grant.credential)
+                    {
+                        None => {
+                            return Err(Error::Corrupt(
+                                "a live grant in the state file names a credential that does not stand"
+                                    .to_string(),
+                            ));
+                        }
+                        Some(credential) => {
+                            if grant.incarnation != credential.incarnation {
+                                return Err(Error::Corrupt(
+                                    "a live grant in the state file carries an incarnation its credential does not stand at"
+                                        .to_string(),
+                                ));
+                            }
+                        }
+                    }
                 }
             }
             (Some(ended_at), Some(reason)) => {
@@ -419,6 +479,7 @@ fn state_documents_equal(a: &State, b: &State) -> bool {
             || mine.value != theirs.value
             || mine.scopes != theirs.scopes
             || mine.enrolled_at != theirs.enrolled_at
+            || mine.incarnation != theirs.incarnation
         {
             return false;
         }
@@ -434,6 +495,7 @@ fn state_documents_equal(a: &State, b: &State) -> bool {
             || mine.expires_at != theirs.expires_at
             || mine.ended_at != theirs.ended_at
             || mine.end_reason != theirs.end_reason
+            || mine.incarnation != theirs.incarnation
         {
             return false;
         }
@@ -952,6 +1014,7 @@ pub fn enroll(
         value: value.to_string(),
         scopes: scopes.to_vec(),
         enrolled_at: now,
+        incarnation: 1,
     });
     session.state.record(
         now,
@@ -1094,6 +1157,7 @@ pub fn rotate(
         value: value.to_string(),
         scopes: scopes.to_vec(),
         enrolled_at: now,
+        incarnation: 1,
     });
     session
         .state
@@ -1117,6 +1181,105 @@ pub fn rotate(
     );
     session.publish()?;
     Ok(ended)
+}
+
+/// Replace the value standing under a name in one act, DK-27.
+///
+/// The act ends every grant that stands live against the standing
+/// incarnation with the stamp and the reason of DK-4, and rewrites
+/// the credential record in place with the new value and the named
+/// scopes and the act instant as its enrolled_at and its
+/// incarnation standing one higher than it stood, under the one
+/// lock with one publish. Returns how many grants the act ended
+/// and the incarnation the act stood up. Replacement mints no
+/// grant and no token, and authorisation after the act is by grant
+/// alone, against the new incarnation.
+pub fn replace(
+    state_path: &Path,
+    unlock: &Unlock,
+    name: &str,
+    value: &str,
+    scopes: &[Scope],
+    now: i64,
+) -> Result<(usize, u64), Error> {
+    check_name("credential name", name)?;
+    check_value(value)?;
+    if scopes.is_empty() {
+        return Err(Error::Caller(
+            "a replacement must name at least one scope".to_string(),
+        ));
+    }
+    for scope in scopes {
+        check_scope(scope)?;
+        if scopes.iter().filter(|other| *other == scope).count() > 1 {
+            return Err(Error::Caller(
+                "a replacement must not repeat a scope".to_string(),
+            ));
+        }
+    }
+    check_instant(now)?;
+    let mut session = Session::open(state_path, unlock, now)?;
+    let position = session
+        .state
+        .credentials
+        .iter()
+        .position(|credential| credential.name == name);
+    let position = match position {
+        Some(position) => position,
+        None => {
+            session.record_refusal(
+                now,
+                "replace",
+                Some(name),
+                None,
+                None,
+                "refused, unknown credential".to_string(),
+            )?;
+            return Err(Error::Refusal(format!(
+                "replace refused, no credential named {name} stands"
+            )));
+        }
+    };
+    let standing = session.state.credentials[position].incarnation;
+    let next = match standing.checked_add(1) {
+        Some(next) => next,
+        None => {
+            session.record_refusal(
+                now,
+                "replace",
+                Some(name),
+                None,
+                None,
+                "refused, incarnation exhausted".to_string(),
+            )?;
+            return Err(Error::Refusal(format!(
+                "replace refused, the credential named {name} stands at the last incarnation"
+            )));
+        }
+    };
+    let mut ended = 0;
+    for grant in session.state.grants.iter_mut() {
+        if grant.credential == name && grant.ended_at.is_none() && now < grant.expires_at {
+            grant.ended_at = Some(now);
+            grant.end_reason = Some("retired".to_string());
+            ended += 1;
+        }
+    }
+    let credential = &mut session.state.credentials[position];
+    credential.value = value.to_string();
+    credential.scopes = scopes.to_vec();
+    credential.enrolled_at = now;
+    credential.incarnation = next;
+    session.state.record(
+        now,
+        "replace",
+        Some(name),
+        None,
+        None,
+        format!("replaced, incarnation {next}"),
+    );
+    session.publish()?;
+    Ok((ended, next))
 }
 
 /// Grant one scope of one credential to a caller, DK-5 and DK-6.
@@ -1185,6 +1348,7 @@ pub fn grant(
             "grant refused, the credential does not carry the requested scope".to_string(),
         ));
     }
+    let minted_incarnation = credential.incarnation;
     let token = random_hex(32)?;
     let mut grant_id = random_hex(16)?;
     while session
@@ -1206,6 +1370,7 @@ pub fn grant(
         expires_at,
         ended_at: None,
         end_reason: None,
+        incarnation: minted_incarnation,
     });
     session.state.record(
         now,
@@ -1278,11 +1443,21 @@ pub fn redeem(
         )?;
         return Err(Error::Redeem(reason));
     }
+    // The lookup finds the value by the name and the incarnation
+    // together, DK-27. It restates the reader invariant of
+    // parse_state inside redeem as defence in depth, at no cost,
+    // because every redeem opens through parse_state, which
+    // refuses a live mismatch at open before this lookup runs, and
+    // no act inside a session can create a mismatch between the
+    // open and the lookup. The reader is the line.
+    let grant_incarnation = session.state.grants[position].incarnation;
     let value = session
         .state
         .credentials
         .iter()
-        .find(|credential| credential.name == credential_name)
+        .find(|credential| {
+            credential.name == credential_name && credential.incarnation == grant_incarnation
+        })
         .map(|credential| credential.value.clone())
         .ok_or_else(|| {
             Error::Corrupt("a live grant names a credential that does not stand".to_string())
