@@ -2401,11 +2401,7 @@ fn contract_key_table_matches_the_rendered_document() {
     let replaced_grant_at = replaced_text
         .find(&format!("\"id\": \"{}\"", replaced_receipt.grant_id))
         .unwrap();
-    assert_text_key_order(
-        &replaced_text,
-        replaced_grant_at,
-        &grant_keys_with_mark,
-    );
+    assert_text_key_order(&replaced_text, replaced_grant_at, &grant_keys_with_mark);
     for grant in replaced_grants
         .iter()
         .filter(|grant| grant["id"] != replaced_receipt.grant_id)
@@ -2574,16 +2570,29 @@ fn replace_swaps_the_value_under_a_standing_name_and_counts_the_incarnation() {
     .unwrap();
     assert_eq!(ended, 0);
     assert_eq!(stood_up, 3);
-    let fresh =
-        deadbolt::grant(&state, &h.open(), "cache-key", &read_scope(), 600, None, T0 + 30)
-            .unwrap();
+    let fresh = deadbolt::grant(
+        &state,
+        &h.open(),
+        "cache-key",
+        &read_scope(),
+        600,
+        None,
+        T0 + 30,
+    )
+    .unwrap();
     assert_eq!(
         deadbolt::redeem(&state, &h.open(), &fresh.token, &read_scope(), T0 + 31).unwrap(),
         VALUE_A
     );
     assert_eq!(
-        deadbolt::redeem(&state, &h.open(), &alpha_receipt.token, &read_scope(), T0 + 31)
-            .unwrap(),
+        deadbolt::redeem(
+            &state,
+            &h.open(),
+            &alpha_receipt.token,
+            &read_scope(),
+            T0 + 31
+        )
+        .unwrap(),
         VALUE_A
     );
     assert_eq!(
@@ -2766,15 +2775,8 @@ fn a_failed_replace_leaves_the_credential_standing_and_redeeming() {
     assert_eq!(refusal.outcome, "refused, unknown credential");
     deadbolt::enroll(&state, &h.open(), "gone", VALUE_C, &[read_scope()], T0 + 11).unwrap();
     deadbolt::retire(&state, &h.open(), "gone", T0 + 12).unwrap();
-    let err = deadbolt::replace(
-        &state,
-        &h.open(),
-        "gone",
-        VALUE_B,
-        &[read_scope()],
-        T0 + 13,
-    )
-    .unwrap_err();
+    let err = deadbolt::replace(&state, &h.open(), "gone", VALUE_B, &[read_scope()], T0 + 13)
+        .unwrap_err();
     assert!(matches!(err, Error::Refusal(_)), "{err}");
     assert_eq!(
         err.to_string(),
@@ -2959,10 +2961,16 @@ fn strict_reading_refuses_incarnation_variants() {
     let mut variants: Vec<(String, String)> = Vec::new();
     let mut doc = serde_json::from_str::<serde_json::Value>(&plain_text).unwrap();
     doc["credentials"][0]["incarnation"] = serde_json::json!(0);
-    variants.push(("a credential carrying an incarnation of 0".to_string(), doc.to_string()));
+    variants.push((
+        "a credential carrying an incarnation of 0".to_string(),
+        doc.to_string(),
+    ));
     let mut doc = serde_json::from_str::<serde_json::Value>(&plain_text).unwrap();
     doc["grants"][0]["incarnation"] = serde_json::json!(0);
-    variants.push(("a grant carrying an incarnation of 0".to_string(), doc.to_string()));
+    variants.push((
+        "a grant carrying an incarnation of 0".to_string(),
+        doc.to_string(),
+    ));
     let mut doc = serde_json::from_str::<serde_json::Value>(&plain_text).unwrap();
     doc["grants"][0]["incarnation"] = serde_json::json!(2);
     variants.push((
@@ -3092,8 +3100,16 @@ fn pre_mark_documents_read_at_incarnation_one_and_render_without_the_key() {
     let plain_dir = test_dir("pre-mark-plain");
     let source = plain_dir.join("source.json");
     enroll_a(&h, &source);
-    let token_receipt =
-        deadbolt::grant(&source, &h.open(), "cache-key", &read_scope(), 600, None, T0).unwrap();
+    let token_receipt = deadbolt::grant(
+        &source,
+        &h.open(),
+        "cache-key",
+        &read_scope(),
+        600,
+        None,
+        T0,
+    )
+    .unwrap();
     let plain_text = document_text(&h, &source);
     assert!(!plain_text.contains("incarnation"));
     let plain = plain_dir.join("plain.json");
@@ -3105,8 +3121,14 @@ fn pre_mark_documents_read_at_incarnation_one_and_render_without_the_key() {
     let adopted_text = document_text(&h, &plain);
     assert!(!adopted_text.contains("incarnation"), "{adopted_text}");
     assert_eq!(
-        deadbolt::redeem(&plain, &h.open(), &token_receipt.token, &read_scope(), T0 + 20)
-            .unwrap(),
+        deadbolt::redeem(
+            &plain,
+            &h.open(),
+            &token_receipt.token,
+            &read_scope(),
+            T0 + 20
+        )
+        .unwrap(),
         VALUE_A
     );
     let (_ended, stood_up) = deadbolt::replace(
@@ -3207,8 +3229,10 @@ fn cli_replace_round_trip_and_its_output() {
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
-    let replace_entries: Vec<&serde_json::Value> =
-        lines.iter().filter(|line| line["kind"] == "replace").collect();
+    let replace_entries: Vec<&serde_json::Value> = lines
+        .iter()
+        .filter(|line| line["kind"] == "replace")
+        .collect();
     assert_eq!(replace_entries.len(), 2);
     assert_eq!(replace_entries[0]["credential"], "cache-key");
     assert_eq!(replace_entries[0]["outcome"], "replaced, incarnation 2");
@@ -3246,9 +3270,16 @@ fn replace_retire_and_enroll_again_leaves_the_store_readable() {
     )
     .unwrap();
     assert_eq!(stood_up, 2);
-    let receipt =
-        deadbolt::grant(&state, &h.open(), "cache-key", &read_scope(), 600, None, T0 + 20)
-            .unwrap();
+    let receipt = deadbolt::grant(
+        &state,
+        &h.open(),
+        "cache-key",
+        &read_scope(),
+        600,
+        None,
+        T0 + 20,
+    )
+    .unwrap();
     let ended = deadbolt::retire(&state, &h.open(), "cache-key", T0 + 30).unwrap();
     assert_eq!(ended, 1);
     deadbolt::enroll(
@@ -3292,13 +3323,26 @@ fn replace_retire_and_enroll_again_leaves_the_store_readable() {
     assert_eq!(ended_grant["ended_at"], T0 + 30);
     assert_eq!(ended_grant["end_reason"], "retired");
     assert_eq!(
-        deadbolt::redeem(&state, &h.open(), &other_receipt.token, &read_scope(), T0 + 60)
-            .unwrap(),
+        deadbolt::redeem(
+            &state,
+            &h.open(),
+            &other_receipt.token,
+            &read_scope(),
+            T0 + 60
+        )
+        .unwrap(),
         VALUE_C
     );
-    let fresh =
-        deadbolt::grant(&state, &h.open(), "cache-key", &read_scope(), 600, None, T0 + 70)
-            .unwrap();
+    let fresh = deadbolt::grant(
+        &state,
+        &h.open(),
+        "cache-key",
+        &read_scope(),
+        600,
+        None,
+        T0 + 70,
+    )
+    .unwrap();
     assert_eq!(
         deadbolt::redeem(&state, &h.open(), &fresh.token, &read_scope(), T0 + 71).unwrap(),
         VALUE_D
