@@ -2121,6 +2121,27 @@ fn assert_text_key_order(text: &str, start: usize, expected: &[&str]) {
     }
 }
 
+/// The field list one object's sentence of DK-26 states, read out
+/// of the contract text itself.
+///
+/// The sentence stands located by its opening words, and the list
+/// it names runs from the word fields to the next comma. Reading
+/// the list from the contract, rather than restating it in this
+/// file alone, is what lets a key respelled or dropped inside
+/// DK-26 fail the pin that checks renderings against the same
+/// expectation.
+fn contract_field_list<'a>(dk26: &'a str, opening: &str) -> Vec<&'a str> {
+    let at = dk26
+        .find(opening)
+        .unwrap_or_else(|| panic!("DK-26 carries no sentence opening {opening}"));
+    let rest = &dk26[at + opening.len()..];
+    let segment = rest.split(',').next().unwrap();
+    let list = segment
+        .strip_prefix("fields ")
+        .unwrap_or_else(|| panic!("the sentence opening {opening} names no field list"));
+    list.split(" and ").collect()
+}
+
 #[test]
 fn contract_key_table_matches_the_rendered_document() {
     let dir = test_dir("contract-key-table");
@@ -2198,6 +2219,11 @@ fn contract_key_table_matches_the_rendered_document() {
     ];
     for grant in grants {
         assert_exact_keys(grant, &grant_keys);
+        let grant_id = grant["id"].as_str().unwrap();
+        assert_eq!(grant_id.len(), 32);
+        assert!(grant_id
+            .chars()
+            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)));
         let token_hash = grant["token_hash"].as_str().unwrap();
         assert_eq!(token_hash.len(), 64);
         assert!(token_hash
@@ -2255,19 +2281,104 @@ fn contract_key_table_matches_the_rendered_document() {
     let audit_at = text.find("\"audit\"").unwrap();
     assert_text_key_order(&text, audit_at, &audit_keys);
 
-    let mut unstamped = document.clone();
-    let unstamped_object = unstamped.as_object_mut().unwrap();
-    unstamped_object.remove("store_id");
-    let plain_state = dir.join("plain.json");
-    std::fs::write(&plain_state, unstamped.to_string()).unwrap();
-    set_mode(&plain_state, 0o600);
-    let plain_text = state_text(&plain_state);
+    // The unstamped arm renders through the library on the
+    // passphrase route, where the document stamp stands empty
+    // under DK-20, so the writer itself renders the document
+    // without the store_id field, and a later act reads that
+    // rendering back through the library.
+    let passphrase_state = dir.join("passphrase.json");
+    let creating_passphrase = Unlock {
+        route: Some(Route::Passphrase),
+        custody: &h.custody,
+        passphrase: &h.passphrase,
+    };
+    deadbolt::enroll(
+        &passphrase_state,
+        &creating_passphrase,
+        "cache-key",
+        VALUE_A,
+        &[read_scope(), scope("bucket", "write")],
+        T0,
+    )
+    .unwrap();
+    deadbolt::grant(
+        &passphrase_state,
+        &h.open(),
+        "cache-key",
+        &read_scope(),
+        600,
+        Some("run-1"),
+        T0,
+    )
+    .unwrap();
+    let entries = deadbolt::audit(&passphrase_state, &h.open(), T0).unwrap();
+    assert_eq!(entries.len(), 2);
+    let raw = state_text(&passphrase_state);
+    let envelope: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    let salt = hex_bytes(envelope["header"]["kdf"]["salt"].as_str().unwrap());
+    let salt: [u8; 16] = salt.try_into().unwrap();
+    let key = deadbolt::custody::derive_key(STORE_PASSPHRASE.as_bytes(), &salt);
+    let plain_text = decrypt_document(&raw, &key);
     let plain_document: serde_json::Value = serde_json::from_str(&plain_text).unwrap();
     assert!(plain_document.get("store_id").is_none());
     assert_exact_keys(
         &plain_document,
         &["format", "credentials", "grants", "audit"],
     );
+    assert_text_key_order(
+        &plain_text,
+        0,
+        &["format", "credentials", "grants", "audit"],
+    );
+    let plain_grants = plain_document["grants"].as_array().unwrap();
+    assert_eq!(plain_grants.len(), 1);
+    assert_exact_keys(&plain_grants[0], &grant_keys);
+    assert!(plain_grants[0]["ended_at"].is_null());
+    assert!(plain_grants[0]["end_reason"].is_null());
+
+    // The contract half of the table. The lists and lengths the
+    // renderings above were checked against are read out of
+    // DK-26's own sentences here, so a key respelled inside the
+    // contract, or a length the contract states falsely, fails
+    // this pin instead of passing against a transcription.
+    let contract_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("CONTRACT.md");
+    let contract = std::fs::read_to_string(contract_path).unwrap();
+    let dk26 = &contract[contract.find("### Obligation DK-26").unwrap()..];
+    assert_eq!(
+        contract_field_list(dk26, "one JSON object carrying the "),
+        vec!["format", "credentials", "grants", "audit"]
+    );
+    assert!(dk26.contains(
+        "one further field store_id standing exactly when the document has been stamped"
+    ));
+    assert!(dk26.contains(
+        "in the construction order format and store_id and credentials and grants and audit"
+    ));
+    assert_eq!(
+        contract_field_list(dk26, "Each credential object carries exactly the "),
+        vec!["name", "value", "scopes", "enrolled_at"]
+    );
+    assert_eq!(
+        contract_field_list(dk26, "each scope object carries exactly the "),
+        vec!["resource", "action"]
+    );
+    assert_eq!(
+        contract_field_list(dk26, "Each grant object carries exactly the "),
+        grant_keys.to_vec()
+    );
+    assert_eq!(
+        contract_field_list(dk26, "Each audit entry carries exactly the "),
+        audit_keys.to_vec()
+    );
+    assert!(dk26.contains(
+        "The store_id field carries the store identifier as 64 lowercase hexadecimal characters"
+    ));
+    assert!(dk26.contains(
+        "The id field carries the grant identifier as 32 lowercase hexadecimal characters"
+    ));
+    assert!(dk26.contains(
+        "The token_hash field carries the SHA-256 hash of the grant token as 64 lowercase hexadecimal characters"
+    ));
 }
 
 #[test]
