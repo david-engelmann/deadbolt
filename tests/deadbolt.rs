@@ -2097,3 +2097,331 @@ fn cli_rotation_round_trip_and_its_output() {
     assert_eq!(pair[1]["credential"], "cache-key");
     assert_eq!(pair[1]["outcome"], "retired, rotation to successor-key");
 }
+
+fn assert_exact_keys(value: &serde_json::Value, expected: &[&str]) {
+    let actual: std::collections::BTreeSet<&str> = value
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    let expected: std::collections::BTreeSet<&str> = expected.iter().copied().collect();
+    assert_eq!(actual, expected);
+}
+
+fn assert_text_key_order(text: &str, start: usize, expected: &[&str]) {
+    let mut position = start;
+    for key in expected {
+        let needle = format!("\"{key}\"");
+        let found = text[position..]
+            .find(&needle)
+            .map(|offset| position + offset)
+            .unwrap_or_else(|| panic!("the key {key} does not stand after byte {position}"));
+        position = found + needle.len();
+    }
+}
+
+/// The field list one object's sentence of DK-26 states, read out
+/// of the contract text itself.
+///
+/// The sentence stands located by its opening words, and the list
+/// it names runs from the word fields to the next comma. Reading
+/// the list from the contract, rather than restating it in this
+/// file alone, is what lets a key respelled or dropped inside
+/// DK-26 fail the pin that checks renderings against the same
+/// expectation.
+fn contract_field_list<'a>(dk26: &'a str, opening: &str) -> Vec<&'a str> {
+    let at = dk26
+        .find(opening)
+        .unwrap_or_else(|| panic!("DK-26 carries no sentence opening {opening}"));
+    let rest = &dk26[at + opening.len()..];
+    let segment = rest.split(',').next().unwrap();
+    let list = segment
+        .strip_prefix("fields ")
+        .unwrap_or_else(|| panic!("the sentence opening {opening} names no field list"));
+    list.split(" and ").collect()
+}
+
+#[test]
+fn contract_key_table_matches_the_rendered_document() {
+    let dir = test_dir("contract-key-table");
+    let h = Harness::new();
+    let state = dir.join("state.json");
+    enroll_a(&h, &state);
+    let live = deadbolt::grant(
+        &state,
+        &h.open(),
+        "cache-key",
+        &read_scope(),
+        600,
+        Some("run-1"),
+        T0,
+    )
+    .unwrap();
+    let ended =
+        deadbolt::grant(&state, &h.open(), "cache-key", &read_scope(), 600, None, T0).unwrap();
+    deadbolt::revoke(&state, &h.open(), &ended.grant_id, T0 + 1).unwrap();
+    assert_ne!(live.grant_id, ended.grant_id);
+
+    let text = document_text(&h, &state);
+    let document: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_exact_keys(
+        &document,
+        &["format", "store_id", "credentials", "grants", "audit"],
+    );
+    let store_id = document["store_id"].as_str().unwrap();
+    assert_eq!(store_id.len(), 64);
+    assert!(store_id
+        .chars()
+        .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)));
+    assert_text_key_order(
+        &text,
+        0,
+        &["format", "store_id", "credentials", "grants", "audit"],
+    );
+
+    let credentials = document["credentials"].as_array().unwrap();
+    assert_eq!(credentials.len(), 1);
+    let credential = &credentials[0];
+    assert_exact_keys(credential, &["name", "value", "scopes", "enrolled_at"]);
+    let scopes = credential["scopes"].as_array().unwrap();
+    assert_eq!(scopes.len(), 2);
+    for scope_object in scopes {
+        assert_exact_keys(scope_object, &["resource", "action"]);
+    }
+    let credentials_at = text.find("\"credentials\"").unwrap();
+    assert_text_key_order(
+        &text,
+        credentials_at,
+        &[
+            "name",
+            "value",
+            "scopes",
+            "resource",
+            "action",
+            "enrolled_at",
+        ],
+    );
+
+    let grants = document["grants"].as_array().unwrap();
+    assert_eq!(grants.len(), 2);
+    let grant_keys = [
+        "id",
+        "credential",
+        "resource",
+        "action",
+        "run_id",
+        "token_hash",
+        "granted_at",
+        "expires_at",
+        "ended_at",
+        "end_reason",
+    ];
+    for grant in grants {
+        assert_exact_keys(grant, &grant_keys);
+        let grant_id = grant["id"].as_str().unwrap();
+        assert_eq!(grant_id.len(), 32);
+        assert!(grant_id
+            .chars()
+            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)));
+        let token_hash = grant["token_hash"].as_str().unwrap();
+        assert_eq!(token_hash.len(), 64);
+        assert!(token_hash
+            .chars()
+            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)));
+    }
+    let live_grant = grants
+        .iter()
+        .find(|grant| grant["id"] == live.grant_id)
+        .unwrap();
+    assert_eq!(live_grant["run_id"], "run-1");
+    assert!(live_grant["ended_at"].is_null());
+    assert!(live_grant["end_reason"].is_null());
+    let ended_grant = grants
+        .iter()
+        .find(|grant| grant["id"] == ended.grant_id)
+        .unwrap();
+    assert!(ended_grant["run_id"].is_null());
+    assert_eq!(ended_grant["ended_at"], T0 + 1);
+    assert_eq!(ended_grant["end_reason"], "revoked");
+    let grants_at = text.find("\"grants\"").unwrap();
+    assert_text_key_order(&text, grants_at, &grant_keys);
+    let first_grant_end = text[grants_at..]
+        .find("\"end_reason\"")
+        .map(|offset| grants_at + offset)
+        .unwrap();
+    assert_text_key_order(&text, first_grant_end, &grant_keys);
+
+    let audit = document["audit"].as_array().unwrap();
+    assert_eq!(audit.len(), 4);
+    let audit_keys = [
+        "seq",
+        "at",
+        "kind",
+        "credential",
+        "resource",
+        "action",
+        "run_id",
+        "outcome",
+    ];
+    for entry in audit {
+        assert_exact_keys(entry, &audit_keys);
+    }
+    assert_eq!(audit[0]["kind"], "enroll");
+    assert!(audit[0]["resource"].is_null());
+    assert!(audit[0]["action"].is_null());
+    assert!(audit[0]["run_id"].is_null());
+    assert_eq!(audit[1]["run_id"], "run-1");
+    assert!(audit[2]["run_id"].is_null());
+    assert_eq!(audit[3]["kind"], "revoke");
+    assert_eq!(audit[3]["credential"], "cache-key");
+    assert_eq!(audit[3]["resource"], "bucket");
+    assert_eq!(audit[3]["action"], "read");
+    assert!(audit[3]["run_id"].is_null());
+    let audit_at = text.find("\"audit\"").unwrap();
+    assert_text_key_order(&text, audit_at, &audit_keys);
+
+    // The unstamped arm renders through the library on the
+    // passphrase route, where the document stamp stands empty
+    // under DK-20, so the writer itself renders the document
+    // without the store_id field, and a later act reads that
+    // rendering back through the library.
+    let passphrase_state = dir.join("passphrase.json");
+    let creating_passphrase = Unlock {
+        route: Some(Route::Passphrase),
+        custody: &h.custody,
+        passphrase: &h.passphrase,
+    };
+    deadbolt::enroll(
+        &passphrase_state,
+        &creating_passphrase,
+        "cache-key",
+        VALUE_A,
+        &[read_scope(), scope("bucket", "write")],
+        T0,
+    )
+    .unwrap();
+    deadbolt::grant(
+        &passphrase_state,
+        &h.open(),
+        "cache-key",
+        &read_scope(),
+        600,
+        Some("run-1"),
+        T0,
+    )
+    .unwrap();
+    let entries = deadbolt::audit(&passphrase_state, &h.open(), T0).unwrap();
+    assert_eq!(entries.len(), 2);
+    let raw = state_text(&passphrase_state);
+    let envelope: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    let salt = hex_bytes(envelope["header"]["kdf"]["salt"].as_str().unwrap());
+    let salt: [u8; 16] = salt.try_into().unwrap();
+    let key = deadbolt::custody::derive_key(STORE_PASSPHRASE.as_bytes(), &salt);
+    let plain_text = decrypt_document(&raw, &key);
+    let plain_document: serde_json::Value = serde_json::from_str(&plain_text).unwrap();
+    assert!(plain_document.get("store_id").is_none());
+    assert_exact_keys(
+        &plain_document,
+        &["format", "credentials", "grants", "audit"],
+    );
+    assert_text_key_order(
+        &plain_text,
+        0,
+        &["format", "credentials", "grants", "audit"],
+    );
+    let plain_grants = plain_document["grants"].as_array().unwrap();
+    assert_eq!(plain_grants.len(), 1);
+    assert_exact_keys(&plain_grants[0], &grant_keys);
+    assert!(plain_grants[0]["ended_at"].is_null());
+    assert!(plain_grants[0]["end_reason"].is_null());
+
+    // The contract half of the table. The lists and lengths the
+    // renderings above were checked against are read out of
+    // DK-26's own sentences here, so a key respelled inside the
+    // contract, or a length the contract states falsely, fails
+    // this pin instead of passing against a transcription.
+    let contract_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("CONTRACT.md");
+    let contract = std::fs::read_to_string(contract_path).unwrap();
+    let dk26 = &contract[contract.find("### Obligation DK-26").unwrap()..];
+    assert_eq!(
+        contract_field_list(dk26, "one JSON object carrying the "),
+        vec!["format", "credentials", "grants", "audit"]
+    );
+    assert!(dk26.contains(
+        "one further field store_id standing exactly when the document has been stamped"
+    ));
+    assert!(dk26.contains(
+        "in the construction order format and store_id and credentials and grants and audit"
+    ));
+    assert_eq!(
+        contract_field_list(dk26, "Each credential object carries exactly the "),
+        vec!["name", "value", "scopes", "enrolled_at"]
+    );
+    assert_eq!(
+        contract_field_list(dk26, "each scope object carries exactly the "),
+        vec!["resource", "action"]
+    );
+    assert_eq!(
+        contract_field_list(dk26, "Each grant object carries exactly the "),
+        grant_keys.to_vec()
+    );
+    assert_eq!(
+        contract_field_list(dk26, "Each audit entry carries exactly the "),
+        audit_keys.to_vec()
+    );
+    assert!(dk26.contains(
+        "The store_id field carries the store identifier as 64 lowercase hexadecimal characters"
+    ));
+    assert!(dk26.contains(
+        "The id field carries the grant identifier as 32 lowercase hexadecimal characters"
+    ));
+    assert!(dk26.contains(
+        "The token_hash field carries the SHA-256 hash of the grant token as 64 lowercase hexadecimal characters"
+    ));
+}
+
+#[test]
+fn audit_output_carries_exactly_the_contract_audit_fields() {
+    let dir = test_dir("audit-output-fields");
+    let state = dir.join("state.json");
+    let state_arg = state.to_string_lossy().into_owned();
+    let (_token, _grant_id) = cli_enroll_and_grant(&dir);
+    let successor_file = dir.join("value2.txt");
+    std::fs::write(&successor_file, format!("{VALUE_B}\n")).unwrap();
+    let successor_arg = successor_file.to_string_lossy().into_owned();
+    let out = run_cli_pp(&[
+        "--state",
+        &state_arg,
+        "rotate",
+        "--name",
+        "cache-key",
+        "--new-name",
+        "successor-key",
+        "--value-file",
+        &successor_arg,
+        "--scope",
+        "bucket:read",
+    ]);
+    assert_eq!(out.status, 0, "{}", out.stderr);
+
+    let out = run_cli_pp(&["--state", &state_arg, "audit"]);
+    assert_eq!(out.status, 0, "{}", out.stderr);
+    let lines: Vec<&str> = out.stdout.lines().collect();
+    assert_eq!(lines.len(), 4);
+    let audit_keys = [
+        "seq",
+        "at",
+        "kind",
+        "credential",
+        "resource",
+        "action",
+        "run_id",
+        "outcome",
+    ];
+    for line in lines {
+        let entry: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert_exact_keys(&entry, &audit_keys);
+        assert_text_key_order(line, 0, &audit_keys);
+    }
+}

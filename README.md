@@ -125,6 +125,94 @@ deadbolt --state usage.json redeem --token 136bc0599d2f0bb079863c5640c10530f1418
 error: redeem refused, revoked
 ```
 
+### Rotation
+
+Rotation replaces a credential with a successor under a new name in one act, and it ends every grant that stands live against the predecessor. The run below stands on the passphrase route, the only route this box and continuous integration can run, because no platform keychain service answers on either, and the shapes it prints are the shapes both routes print. It runs on its own store named rotation.json, apart from the usage.json sequence the earlier sections share.
+
+```
+export DEADBOLT_PASSPHRASE='SYNTHETIC-TEST-VALUE-passphrase'
+echo 'SYNTHETIC-TEST-VALUE-cache-key-v1' > cache-key-v1.txt
+echo 'SYNTHETIC-TEST-VALUE-cache-key-v2' > cache-key-v2.txt
+deadbolt --state rotation.json --route passphrase enroll --name cache-key --value-file cache-key-v1.txt --scope bucket:read --scope bucket:write
+```
+
+```
+{"enrolled":"cache-key"}
+```
+
+A grant against the predecessor redeems the first value.
+
+```
+deadbolt --state rotation.json grant --credential cache-key --scope bucket:read --ttl 600 --run rotation-demo
+```
+
+```
+{"expires_at":1794272744,"grant_id":"3871c1c444150157a2b658bd82ffe6a0","token":"5d2dedd46d4a4cc55a570c855631e939146509bea24c5818ef682fdaf56f6b1c"}
+```
+
+```
+deadbolt --state rotation.json redeem --token 5d2dedd46d4a4cc55a570c855631e939146509bea24c5818ef682fdaf56f6b1c --scope bucket:read
+```
+
+```
+SYNTHETIC-TEST-VALUE-cache-key-v1
+```
+
+The rotation names the successor and its scopes in the act, with no scope carried over from the predecessor.
+
+```
+deadbolt --state rotation.json rotate --name cache-key --new-name cache-key-2026 --value-file cache-key-v2.txt --scope bucket:read --scope bucket:write
+```
+
+```
+{"grants_ended":1,"rotated":"cache-key","successor":"cache-key-2026"}
+```
+
+The grant the rotation ended answers revoked, and its token redeems never again.
+
+```
+deadbolt --state rotation.json redeem --token 5d2dedd46d4a4cc55a570c855631e939146509bea24c5818ef682fdaf56f6b1c --scope bucket:read
+```
+
+```
+error: redeem refused, revoked
+```
+
+A grant against the successor redeems the second value.
+
+```
+deadbolt --state rotation.json grant --credential cache-key-2026 --scope bucket:read --ttl 600
+```
+
+```
+{"expires_at":1794272809,"grant_id":"d9debb47692800a97ff2a501eac4a403","token":"2c1fe8e4aa4360c433a9feffa1758f94816cd528e61e311331eec1962ccf21eb"}
+```
+
+```
+deadbolt --state rotation.json redeem --token 2c1fe8e4aa4360c433a9feffa1758f94816cd528e61e311331eec1962ccf21eb --scope bucket:read
+```
+
+```
+SYNTHETIC-TEST-VALUE-cache-key-v2
+```
+
+The audit read over this store shows the rotation as a linked pair, the enroll of the successor and the retire of the predecessor consecutive at one instant.
+
+```
+deadbolt --state rotation.json audit
+```
+
+```
+{"seq":1,"at":1794272130,"kind":"enroll","credential":"cache-key","resource":null,"action":null,"run_id":null,"outcome":"enrolled"}
+{"seq":2,"at":1794272144,"kind":"grant","credential":"cache-key","resource":"bucket","action":"read","run_id":"rotation-demo","outcome":"granted"}
+{"seq":3,"at":1794272156,"kind":"redeem","credential":"cache-key","resource":"bucket","action":"read","run_id":"rotation-demo","outcome":"redeemed"}
+{"seq":4,"at":1794272169,"kind":"enroll","credential":"cache-key-2026","resource":null,"action":null,"run_id":null,"outcome":"enrolled, rotation of cache-key"}
+{"seq":5,"at":1794272169,"kind":"retire","credential":"cache-key","resource":null,"action":null,"run_id":null,"outcome":"retired, rotation to cache-key-2026"}
+{"seq":6,"at":1794272191,"kind":"redeem","credential":"cache-key","resource":"bucket","action":"read","run_id":"rotation-demo","outcome":"refused, revoked"}
+{"seq":7,"at":1794272209,"kind":"grant","credential":"cache-key-2026","resource":"bucket","action":"read","run_id":null,"outcome":"granted"}
+{"seq":8,"at":1794272231,"kind":"redeem","credential":"cache-key-2026","resource":"bucket","action":"read","run_id":null,"outcome":"redeemed"}
+```
+
 ### Audit
 
 The audit read prints one record per act in order, and the sequence runs gapless from one. Every act stands in the log with its outcome, grants and redemptions and refusals alike, and no record carries a value, a token, or a token hash.
@@ -154,7 +242,7 @@ What is not built. Deadbolt has no daemon, no network service, and no Python bin
 
 Closed perfection rounds are 3 of 100. A round counts only when a full cycle of work and audit and review and red team and approval has closed, and seeding and setup are not rounds.
 
-The contract lives in CONTRACT.md, where obligations DK-1 to DK-25 state the broker semantics, the limits, and the custody and envelope rules.
+The contract lives in CONTRACT.md, where obligations DK-1 to DK-26 state the broker semantics, the limits, and the custody and envelope rules.
 
 The remote seed was verified on 2026-11-02 against the staged seed and its commit is 08a05b881350c6ca5eb8a42af28d25f194c6d039, a parentless commit holding exactly README.md and LICENSE and .gitignore.
 
