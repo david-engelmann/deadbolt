@@ -2336,6 +2336,84 @@ fn contract_key_table_matches_the_rendered_document() {
     assert!(plain_grants[0]["ended_at"].is_null());
     assert!(plain_grants[0]["end_reason"].is_null());
 
+    // The replace arm of the table, DK-27. A credential replaced
+    // once renders with the incarnation key standing last at 2,
+    // and a grant minted against it renders with the key standing
+    // last at 2, while the grants minted at incarnation 1 in the
+    // same document keep rendering no key at all, so both arms of
+    // the conditional rendering stand checked against renderings
+    // here and against the contract text below.
+    let (replace_ended, stood_up) = deadbolt::replace(
+        &state,
+        &h.open(),
+        "cache-key",
+        VALUE_B,
+        &[read_scope(), scope("bucket", "write")],
+        T0 + 2,
+    )
+    .unwrap();
+    assert_eq!(replace_ended, 1);
+    assert_eq!(stood_up, 2);
+    let replaced_receipt = deadbolt::grant(
+        &state,
+        &h.open(),
+        "cache-key",
+        &read_scope(),
+        600,
+        None,
+        T0 + 3,
+    )
+    .unwrap();
+    let replaced_text = document_text(&h, &state);
+    let replaced_document: serde_json::Value = serde_json::from_str(&replaced_text).unwrap();
+    let credential_keys_with_mark = ["name", "value", "scopes", "enrolled_at", "incarnation"];
+    let replaced_credentials = replaced_document["credentials"].as_array().unwrap();
+    assert_eq!(replaced_credentials.len(), 1);
+    assert_exact_keys(&replaced_credentials[0], &credential_keys_with_mark);
+    assert_eq!(replaced_credentials[0]["incarnation"], 2);
+    let replaced_credentials_at = replaced_text.find("\"credentials\"").unwrap();
+    assert_text_key_order(
+        &replaced_text,
+        replaced_credentials_at,
+        &credential_keys_with_mark,
+    );
+    let grant_keys_with_mark = [
+        "id",
+        "credential",
+        "resource",
+        "action",
+        "run_id",
+        "token_hash",
+        "granted_at",
+        "expires_at",
+        "ended_at",
+        "end_reason",
+        "incarnation",
+    ];
+    let replaced_grants = replaced_document["grants"].as_array().unwrap();
+    assert_eq!(replaced_grants.len(), 3);
+    let replaced_grant = replaced_grants
+        .iter()
+        .find(|grant| grant["id"] == replaced_receipt.grant_id)
+        .unwrap();
+    assert_exact_keys(replaced_grant, &grant_keys_with_mark);
+    assert_eq!(replaced_grant["incarnation"], 2);
+    let replaced_grant_at = replaced_text
+        .find(&format!("\"id\": \"{}\"", replaced_receipt.grant_id))
+        .unwrap();
+    assert_text_key_order(
+        &replaced_text,
+        replaced_grant_at,
+        &grant_keys_with_mark,
+    );
+    for grant in replaced_grants
+        .iter()
+        .filter(|grant| grant["id"] != replaced_receipt.grant_id)
+    {
+        assert_exact_keys(grant, &grant_keys);
+        assert!(grant.get("incarnation").is_none());
+    }
+
     // The contract half of the table. The lists and lengths the
     // renderings above were checked against are read out of
     // DK-26's own sentences here, so a key respelled inside the
@@ -2356,7 +2434,7 @@ fn contract_key_table_matches_the_rendered_document() {
     ));
     assert_eq!(
         contract_field_list(dk26, "Each credential object carries exactly the "),
-        vec!["name", "value", "scopes", "enrolled_at"]
+        vec!["name", "value", "scopes", "enrolled_at", "incarnation"]
     );
     assert_eq!(
         contract_field_list(dk26, "each scope object carries exactly the "),
@@ -2364,7 +2442,7 @@ fn contract_key_table_matches_the_rendered_document() {
     );
     assert_eq!(
         contract_field_list(dk26, "Each grant object carries exactly the "),
-        grant_keys.to_vec()
+        grant_keys_with_mark.to_vec()
     );
     assert_eq!(
         contract_field_list(dk26, "Each audit entry carries exactly the "),
@@ -2424,4 +2502,805 @@ fn audit_output_carries_exactly_the_contract_audit_fields() {
         assert_exact_keys(&entry, &audit_keys);
         assert_text_key_order(line, 0, &audit_keys);
     }
+}
+
+// DK-27, same name replacement and the incarnation mark. The pins
+// below land with the build slice, over the standing harness, and
+// every fixture value carries the SYNTHETIC-TEST-VALUE marker.
+
+#[test]
+fn replace_swaps_the_value_under_a_standing_name_and_counts_the_incarnation() {
+    let dir = test_dir("replace-swaps");
+    let h = Harness::new();
+    let state = dir.join("state.json");
+    deadbolt::enroll(
+        &state,
+        &h.creating(),
+        "alpha-key",
+        VALUE_A,
+        &[read_scope()],
+        T0,
+    )
+    .unwrap();
+    deadbolt::enroll(
+        &state,
+        &h.open(),
+        "cache-key",
+        VALUE_B,
+        &[read_scope(), scope("bucket", "write")],
+        T0,
+    )
+    .unwrap();
+    deadbolt::enroll(
+        &state,
+        &h.open(),
+        "vault-key",
+        VALUE_C,
+        &[scope("vault", "read")],
+        T0,
+    )
+    .unwrap();
+    let alpha_receipt =
+        deadbolt::grant(&state, &h.open(), "alpha-key", &read_scope(), 600, None, T0).unwrap();
+    let vault_receipt = deadbolt::grant(
+        &state,
+        &h.open(),
+        "vault-key",
+        &scope("vault", "read"),
+        600,
+        None,
+        T0,
+    )
+    .unwrap();
+    let (ended, stood_up) = deadbolt::replace(
+        &state,
+        &h.open(),
+        "cache-key",
+        VALUE_D,
+        &[scope("bucket", "write")],
+        T0 + 10,
+    )
+    .unwrap();
+    assert_eq!(ended, 0);
+    assert_eq!(stood_up, 2);
+    let (ended, stood_up) = deadbolt::replace(
+        &state,
+        &h.open(),
+        "cache-key",
+        VALUE_A,
+        &[read_scope()],
+        T0 + 20,
+    )
+    .unwrap();
+    assert_eq!(ended, 0);
+    assert_eq!(stood_up, 3);
+    let fresh =
+        deadbolt::grant(&state, &h.open(), "cache-key", &read_scope(), 600, None, T0 + 30)
+            .unwrap();
+    assert_eq!(
+        deadbolt::redeem(&state, &h.open(), &fresh.token, &read_scope(), T0 + 31).unwrap(),
+        VALUE_A
+    );
+    assert_eq!(
+        deadbolt::redeem(&state, &h.open(), &alpha_receipt.token, &read_scope(), T0 + 31)
+            .unwrap(),
+        VALUE_A
+    );
+    assert_eq!(
+        deadbolt::redeem(
+            &state,
+            &h.open(),
+            &vault_receipt.token,
+            &scope("vault", "read"),
+            T0 + 31
+        )
+        .unwrap(),
+        VALUE_C
+    );
+    let text = document_text(&h, &state);
+    let json = document_json(&h, &state);
+    let credentials = json["credentials"].as_array().unwrap();
+    let names: Vec<&str> = credentials
+        .iter()
+        .map(|credential| credential["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["alpha-key", "cache-key", "vault-key"]);
+    let replaced = &credentials[1];
+    assert_eq!(replaced["value"], VALUE_A);
+    assert_eq!(replaced["incarnation"], 3);
+    assert_eq!(replaced["enrolled_at"], T0 + 20);
+    assert_eq!(replaced["scopes"].as_array().unwrap().len(), 1);
+    assert!(credentials[0].get("incarnation").is_none());
+    assert!(credentials[2].get("incarnation").is_none());
+    let credentials_at = text.find("\"credentials\"").unwrap();
+    assert_text_key_order(
+        &text,
+        credentials_at,
+        &[
+            "name",
+            "value",
+            "scopes",
+            "enrolled_at",
+            "name",
+            "value",
+            "scopes",
+            "enrolled_at",
+            "incarnation",
+        ],
+    );
+}
+
+#[test]
+fn replace_ends_live_grants_and_their_tokens_answer_revoked() {
+    let dir = test_dir("replace-revoked");
+    let h = Harness::new();
+    let state = dir.join("state.json");
+    enroll_a(&h, &state);
+    let receipt =
+        deadbolt::grant(&state, &h.open(), "cache-key", &read_scope(), 600, None, T0).unwrap();
+    assert_eq!(
+        deadbolt::redeem(&state, &h.open(), &receipt.token, &read_scope(), T0 + 10).unwrap(),
+        VALUE_A
+    );
+    let (ended, stood_up) = deadbolt::replace(
+        &state,
+        &h.open(),
+        "cache-key",
+        VALUE_B,
+        &[read_scope()],
+        T0 + 20,
+    )
+    .unwrap();
+    assert_eq!(ended, 1);
+    assert_eq!(stood_up, 2);
+    let err =
+        deadbolt::redeem(&state, &h.open(), &receipt.token, &read_scope(), T0 + 30).unwrap_err();
+    assert!(
+        matches!(err, Error::Redeem(RedeemRefusal::Revoked)),
+        "{err}"
+    );
+    let json = document_json(&h, &state);
+    let grant = &json["grants"].as_array().unwrap()[0];
+    assert_eq!(grant["ended_at"], T0 + 20);
+    assert_eq!(grant["end_reason"], "retired");
+    assert!(grant.get("incarnation").is_none());
+}
+
+#[test]
+fn replace_leaves_expired_grants_unended_and_answering_expired() {
+    let dir = test_dir("replace-expired");
+    let h = Harness::new();
+    let state = dir.join("state.json");
+    enroll_a(&h, &state);
+    let short =
+        deadbolt::grant(&state, &h.open(), "cache-key", &read_scope(), 60, None, T0).unwrap();
+    let _long =
+        deadbolt::grant(&state, &h.open(), "cache-key", &read_scope(), 600, None, T0).unwrap();
+    let (ended, stood_up) = deadbolt::replace(
+        &state,
+        &h.open(),
+        "cache-key",
+        VALUE_B,
+        &[read_scope()],
+        T0 + 120,
+    )
+    .unwrap();
+    assert_eq!(ended, 1);
+    assert_eq!(stood_up, 2);
+    let json = document_json(&h, &state);
+    let expired = json["grants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|grant| grant["expires_at"] == T0 + 60)
+        .unwrap();
+    assert!(expired["ended_at"].is_null());
+    assert!(expired["end_reason"].is_null());
+    let err =
+        deadbolt::redeem(&state, &h.open(), &short.token, &read_scope(), T0 + 120).unwrap_err();
+    assert!(
+        matches!(err, Error::Redeem(RedeemRefusal::Expired)),
+        "{err}"
+    );
+}
+
+#[test]
+fn replace_records_one_entry_naming_the_new_incarnation() {
+    let dir = test_dir("replace-entry");
+    let h = Harness::new();
+    let state = dir.join("state.json");
+    enroll_a(&h, &state);
+    deadbolt::grant(&state, &h.open(), "cache-key", &read_scope(), 600, None, T0).unwrap();
+    let before = deadbolt::audit(&state, &h.open(), T0).unwrap();
+    deadbolt::replace(
+        &state,
+        &h.open(),
+        "cache-key",
+        VALUE_B,
+        &[read_scope()],
+        T0 + 10,
+    )
+    .unwrap();
+    let entries = deadbolt::audit(&state, &h.open(), T0).unwrap();
+    assert_eq!(entries.len(), before.len() + 1);
+    for (index, entry) in entries.iter().enumerate() {
+        assert_eq!(entry.seq, index as u64 + 1);
+    }
+    let entry = entries.last().unwrap();
+    assert_eq!(entry.kind, "replace");
+    assert_eq!(entry.credential.as_deref(), Some("cache-key"));
+    assert_eq!(entry.outcome, "replaced, incarnation 2");
+    assert_eq!(entry.at, T0 + 10);
+    assert!(entry.resource.is_none() && entry.action.is_none() && entry.run_id.is_none());
+    let kinds: Vec<&str> = entries.iter().map(|e| e.kind.as_str()).collect();
+    assert_eq!(kinds, ["enroll", "grant", "replace"]);
+}
+
+#[test]
+fn a_failed_replace_leaves_the_credential_standing_and_redeeming() {
+    let dir = test_dir("replace-failed");
+    let h = Harness::new();
+    let state = dir.join("state.json");
+    enroll_a(&h, &state);
+    let receipt =
+        deadbolt::grant(&state, &h.open(), "cache-key", &read_scope(), 600, None, T0).unwrap();
+    let err = deadbolt::replace(
+        &state,
+        &h.open(),
+        "ghost",
+        VALUE_B,
+        &[read_scope()],
+        T0 + 10,
+    )
+    .unwrap_err();
+    assert!(matches!(err, Error::Refusal(_)), "{err}");
+    assert_eq!(
+        err.to_string(),
+        "replace refused, no credential named ghost stands"
+    );
+    let entries = deadbolt::audit(&state, &h.open(), T0).unwrap();
+    assert_eq!(entries.len(), 3);
+    let refusal = &entries[2];
+    assert_eq!(refusal.kind, "replace");
+    assert_eq!(refusal.credential.as_deref(), Some("ghost"));
+    assert_eq!(refusal.outcome, "refused, unknown credential");
+    deadbolt::enroll(&state, &h.open(), "gone", VALUE_C, &[read_scope()], T0 + 11).unwrap();
+    deadbolt::retire(&state, &h.open(), "gone", T0 + 12).unwrap();
+    let err = deadbolt::replace(
+        &state,
+        &h.open(),
+        "gone",
+        VALUE_B,
+        &[read_scope()],
+        T0 + 13,
+    )
+    .unwrap_err();
+    assert!(matches!(err, Error::Refusal(_)), "{err}");
+    assert_eq!(
+        err.to_string(),
+        "replace refused, no credential named gone stands"
+    );
+    let entries = deadbolt::audit(&state, &h.open(), T0).unwrap();
+    let last = entries.last().unwrap();
+    assert_eq!(last.kind, "replace");
+    assert_eq!(last.credential.as_deref(), Some("gone"));
+    assert_eq!(last.outcome, "refused, unknown credential");
+    assert_eq!(
+        deadbolt::redeem(&state, &h.open(), &receipt.token, &read_scope(), T0 + 20).unwrap(),
+        VALUE_A
+    );
+    let json = document_json(&h, &state);
+    let control = json["credentials"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|credential| credential["name"] == "cache-key")
+        .unwrap();
+    assert_eq!(control["value"], VALUE_A);
+    assert!(control.get("incarnation").is_none());
+}
+
+#[test]
+fn replace_shape_errors_are_caller_errors_and_record_nothing() {
+    let dir = test_dir("replace-shapes");
+    let h = Harness::new();
+    let state = dir.join("state.json");
+    enroll_a(&h, &state);
+    let attempts: Vec<(&str, &str, Vec<Scope>)> = vec![
+        ("bad name", VALUE_B, vec![read_scope()]),
+        ("", VALUE_B, vec![read_scope()]),
+        ("cache-key", VALUE_B, vec![]),
+        ("cache-key", VALUE_B, vec![read_scope(), read_scope()]),
+        ("cache-key", "", vec![read_scope()]),
+        ("cache-key", "two\nlines", vec![read_scope()]),
+        ("cache-key", VALUE_B, vec![scope("bad name", "read")]),
+        ("cache-key", VALUE_B, vec![scope("bucket", "bad action")]),
+    ];
+    for (name, value, scopes) in &attempts {
+        let err = deadbolt::replace(&state, &h.open(), name, value, scopes, T0 + 1).unwrap_err();
+        assert!(matches!(err, Error::Caller(_)), "{err}");
+    }
+    let entries = deadbolt::audit(&state, &h.open(), T0).unwrap();
+    assert_eq!(entries.len(), 1);
+    let receipt = deadbolt::grant(
+        &state,
+        &h.open(),
+        "cache-key",
+        &read_scope(),
+        600,
+        None,
+        T0 + 2,
+    )
+    .unwrap();
+    assert_eq!(
+        deadbolt::redeem(&state, &h.open(), &receipt.token, &read_scope(), T0 + 3).unwrap(),
+        VALUE_A
+    );
+}
+
+#[test]
+fn grants_carry_the_incarnation_they_were_minted_under() {
+    let dir = test_dir("replace-grant-marks");
+    let h = Harness::new();
+    let state = dir.join("state.json");
+    enroll_a(&h, &state);
+    let first =
+        deadbolt::grant(&state, &h.open(), "cache-key", &read_scope(), 600, None, T0).unwrap();
+    let json = document_json(&h, &state);
+    let grant = json["grants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|grant| grant["id"] == first.grant_id)
+        .unwrap();
+    assert!(grant.get("incarnation").is_none());
+    deadbolt::replace(
+        &state,
+        &h.open(),
+        "cache-key",
+        VALUE_B,
+        &[read_scope()],
+        T0 + 10,
+    )
+    .unwrap();
+    let second = deadbolt::grant(
+        &state,
+        &h.open(),
+        "cache-key",
+        &read_scope(),
+        600,
+        None,
+        T0 + 20,
+    )
+    .unwrap();
+    let text = document_text(&h, &state);
+    let json = document_json(&h, &state);
+    let grant = json["grants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|grant| grant["id"] == second.grant_id)
+        .unwrap();
+    assert_eq!(grant["incarnation"], 2);
+    let grant_at = text
+        .find(&format!("\"id\": \"{}\"", second.grant_id))
+        .unwrap();
+    assert_text_key_order(
+        &text,
+        grant_at,
+        &[
+            "id",
+            "credential",
+            "resource",
+            "action",
+            "run_id",
+            "token_hash",
+            "granted_at",
+            "expires_at",
+            "ended_at",
+            "end_reason",
+            "incarnation",
+        ],
+    );
+    deadbolt::replace(
+        &state,
+        &h.open(),
+        "cache-key",
+        VALUE_C,
+        &[read_scope()],
+        T0 + 30,
+    )
+    .unwrap();
+    let json = document_json(&h, &state);
+    let credential = &json["credentials"].as_array().unwrap()[0];
+    assert_eq!(credential["incarnation"], 3);
+    let grant = json["grants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|grant| grant["id"] == second.grant_id)
+        .unwrap();
+    assert_eq!(grant["incarnation"], 2);
+    assert_eq!(grant["ended_at"], T0 + 30);
+    assert_eq!(grant["end_reason"], "retired");
+    let err =
+        deadbolt::redeem(&state, &h.open(), &second.token, &read_scope(), T0 + 40).unwrap_err();
+    assert!(
+        matches!(err, Error::Redeem(RedeemRefusal::Revoked)),
+        "{err}"
+    );
+}
+
+#[test]
+fn strict_reading_refuses_incarnation_variants() {
+    let dir = test_dir("incarnation-corrupt-base");
+    let h = Harness::new();
+    let base = dir.join("base.json");
+    enroll_a(&h, &base);
+    deadbolt::grant(
+        &base,
+        &h.open(),
+        "cache-key",
+        &read_scope(),
+        600,
+        Some("run-1"),
+        T0,
+    )
+    .unwrap();
+    let plain_text = document_text(&h, &base);
+    let plain = dir.join("plain.json");
+    std::fs::write(&plain, &plain_text).unwrap();
+    set_mode(&plain, 0o600);
+    // The control reads clean through the plaintext path, so each
+    // refusal below is the staged mark and nothing else.
+    let control = deadbolt::audit(&plain, &h.creating(), T0 + 1).unwrap();
+    assert_eq!(control.len(), 3);
+
+    let mut variants: Vec<(String, String)> = Vec::new();
+    let mut doc = serde_json::from_str::<serde_json::Value>(&plain_text).unwrap();
+    doc["credentials"][0]["incarnation"] = serde_json::json!(0);
+    variants.push(("a credential carrying an incarnation of 0".to_string(), doc.to_string()));
+    let mut doc = serde_json::from_str::<serde_json::Value>(&plain_text).unwrap();
+    doc["grants"][0]["incarnation"] = serde_json::json!(0);
+    variants.push(("a grant carrying an incarnation of 0".to_string(), doc.to_string()));
+    let mut doc = serde_json::from_str::<serde_json::Value>(&plain_text).unwrap();
+    doc["grants"][0]["incarnation"] = serde_json::json!(2);
+    variants.push((
+        "a live grant carrying an incarnation above its credential".to_string(),
+        doc.to_string(),
+    ));
+
+    let rdir = test_dir("incarnation-corrupt-replaced");
+    let rstate = rdir.join("state.json");
+    enroll_a(&h, &rstate);
+    deadbolt::replace(
+        &rstate,
+        &h.open(),
+        "cache-key",
+        VALUE_B,
+        &[read_scope(), scope("bucket", "write")],
+        T0 + 10,
+    )
+    .unwrap();
+    let live = deadbolt::grant(
+        &rstate,
+        &h.open(),
+        "cache-key",
+        &read_scope(),
+        600,
+        None,
+        T0 + 20,
+    )
+    .unwrap();
+    let replaced_text = document_text(&h, &rstate);
+    let mut doc = serde_json::from_str::<serde_json::Value>(&replaced_text).unwrap();
+    let grant_index = doc["grants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|grant| grant["id"] == live.grant_id)
+        .unwrap();
+    doc["grants"][grant_index]["incarnation"] = serde_json::json!(1);
+    variants.push((
+        "a live grant carrying an incarnation below its credential".to_string(),
+        doc.to_string(),
+    ));
+    // The discrimination the round exists for. The same grant with
+    // the incarnation key deleted reads at 1 beside the credential
+    // as it stood before the replacement, and reads clean.
+    let pre_dir = test_dir("incarnation-pre-replacement");
+    let pre_state = pre_dir.join("state.json");
+    std::fs::write(&pre_state, &plain_text).unwrap();
+    set_mode(&pre_state, 0o600);
+    assert!(deadbolt::audit(&pre_state, &h.creating(), T0 + 1).is_ok());
+
+    let mut doc = serde_json::from_str::<serde_json::Value>(&plain_text).unwrap();
+    doc["credentials"][0]["incarnation"] = serde_json::json!(u64::MAX);
+    doc["grants"][0]["incarnation"] = serde_json::json!(u64::MAX);
+    variants.push((
+        "a credential standing at the largest incarnation value".to_string(),
+        doc.to_string(),
+    ));
+
+    for (label, text) in &variants {
+        let vdir = test_dir("incarnation-corrupt");
+        let vstate = vdir.join("state.json");
+        std::fs::write(&vstate, text).unwrap();
+        set_mode(&vstate, 0o600);
+        if label == "a credential standing at the largest incarnation value" {
+            // An honest document at the reader, which then refuses
+            // its replacement in the words of DK-27.
+            let entries = deadbolt::audit(&vstate, &h.creating(), T0 + 1).unwrap();
+            assert_eq!(entries.len(), 3, "{label}");
+            let err = deadbolt::replace(
+                &vstate,
+                &h.open(),
+                "cache-key",
+                VALUE_B,
+                &[read_scope()],
+                T0 + 2,
+            )
+            .unwrap_err();
+            assert!(matches!(err, Error::Refusal(_)), "{label}: {err}");
+            assert_eq!(
+                err.to_string(),
+                "replace refused, the credential named cache-key stands at the last incarnation",
+                "{label}"
+            );
+            let entries = deadbolt::audit(&vstate, &h.open(), T0 + 3).unwrap();
+            let last = entries.last().unwrap();
+            assert_eq!(last.kind, "replace");
+            assert_eq!(last.outcome, "refused, incarnation exhausted");
+            continue;
+        }
+        let err = deadbolt::audit(&vstate, &h.open(), T0).unwrap_err();
+        assert!(matches!(err, Error::Corrupt(_)), "{label}: {err}");
+        let err = deadbolt::grant(&vstate, &h.open(), "cache-key", &read_scope(), 60, None, T0)
+            .unwrap_err();
+        assert!(matches!(err, Error::Corrupt(_)), "{label}: {err}");
+        assert_eq!(state_text(&vstate), *text, "{label}");
+    }
+}
+
+#[test]
+fn pre_mark_documents_read_at_incarnation_one_and_render_without_the_key() {
+    let dir = test_dir("pre-mark");
+    let h = Harness::new();
+    let state = dir.join("state.json");
+    enroll_a(&h, &state);
+    deadbolt::grant(&state, &h.open(), "cache-key", &read_scope(), 600, None, T0).unwrap();
+    let text = document_text(&h, &state);
+    assert!(!text.contains("incarnation"), "{text}");
+    let (ended, stood_up) = deadbolt::replace(
+        &state,
+        &h.open(),
+        "cache-key",
+        VALUE_B,
+        &[read_scope()],
+        T0 + 10,
+    )
+    .unwrap();
+    assert_eq!(ended, 1);
+    assert_eq!(stood_up, 2);
+    let text = document_text(&h, &state);
+    let json = document_json(&h, &state);
+    assert_eq!(json["credentials"].as_array().unwrap()[0]["incarnation"], 2);
+
+    // A plaintext document written in the pre mark shape adopts
+    // with every incarnation standing at 1 and no entry owed to
+    // the mark.
+    let plain_dir = test_dir("pre-mark-plain");
+    let source = plain_dir.join("source.json");
+    enroll_a(&h, &source);
+    let token_receipt =
+        deadbolt::grant(&source, &h.open(), "cache-key", &read_scope(), 600, None, T0).unwrap();
+    let plain_text = document_text(&h, &source);
+    assert!(!plain_text.contains("incarnation"));
+    let plain = plain_dir.join("plain.json");
+    std::fs::write(&plain, &plain_text).unwrap();
+    set_mode(&plain, 0o600);
+    let entries = deadbolt::audit(&plain, &h.creating(), T0 + 10).unwrap();
+    let kinds: Vec<&str> = entries.iter().map(|e| e.kind.as_str()).collect();
+    assert_eq!(kinds, ["enroll", "grant", "adopt"]);
+    let adopted_text = document_text(&h, &plain);
+    assert!(!adopted_text.contains("incarnation"), "{adopted_text}");
+    assert_eq!(
+        deadbolt::redeem(&plain, &h.open(), &token_receipt.token, &read_scope(), T0 + 20)
+            .unwrap(),
+        VALUE_A
+    );
+    let (_ended, stood_up) = deadbolt::replace(
+        &plain,
+        &h.open(),
+        "cache-key",
+        VALUE_B,
+        &[read_scope()],
+        T0 + 30,
+    )
+    .unwrap();
+    assert_eq!(stood_up, 2);
+}
+
+#[test]
+fn cli_replace_round_trip_and_its_output() {
+    let dir = test_dir("cli-replace");
+    let state = dir.join("state.json");
+    let state_arg = state.to_string_lossy().into_owned();
+    let (token, _grant_id) = cli_enroll_and_grant(&dir);
+    let value_file = dir.join("value2.txt");
+    std::fs::write(&value_file, format!("{VALUE_B}\n")).unwrap();
+    let value_arg = value_file.to_string_lossy().into_owned();
+    let out = run_cli_pp(&[
+        "--state",
+        &state_arg,
+        "replace",
+        "--name",
+        "cache-key",
+        "--value-file",
+        &value_arg,
+        "--scope",
+        "bucket:read",
+    ]);
+    assert_eq!(out.status, 0, "{}", out.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(parsed["replaced"], "cache-key");
+    assert_eq!(parsed["incarnation"], 2);
+    assert_eq!(parsed["grants_ended"], 1);
+    let out = run_cli_pp(&[
+        "--state",
+        &state_arg,
+        "grant",
+        "--credential",
+        "cache-key",
+        "--scope",
+        "bucket:read",
+        "--ttl",
+        "600",
+    ]);
+    assert_eq!(out.status, 0, "{}", out.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    let new_token = parsed["token"].as_str().unwrap().to_string();
+    let out = run_cli_pp(&[
+        "--state",
+        &state_arg,
+        "redeem",
+        "--token",
+        &new_token,
+        "--scope",
+        "bucket:read",
+    ]);
+    assert_eq!(out.status, 0, "{}", out.stderr);
+    assert_eq!(out.stdout, format!("{VALUE_B}\n"));
+    let out = run_cli_pp(&[
+        "--state",
+        &state_arg,
+        "redeem",
+        "--token",
+        &token,
+        "--scope",
+        "bucket:read",
+    ]);
+    assert_eq!(out.status, 1, "{}", out.stderr);
+    assert!(out.stderr.contains("revoked"), "{}", out.stderr);
+    let out = run_cli_pp(&[
+        "--state",
+        &state_arg,
+        "replace",
+        "--name",
+        "ghost",
+        "--value-file",
+        &value_arg,
+        "--scope",
+        "bucket:read",
+    ]);
+    assert_eq!(out.status, 1, "{}", out.stderr);
+    assert!(
+        out.stderr
+            .contains("replace refused, no credential named ghost stands"),
+        "{}",
+        out.stderr
+    );
+    let out = run_cli_pp(&["--state", &state_arg, "audit"]);
+    assert_eq!(out.status, 0, "{}", out.stderr);
+    let lines: Vec<serde_json::Value> = out
+        .stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let replace_entries: Vec<&serde_json::Value> =
+        lines.iter().filter(|line| line["kind"] == "replace").collect();
+    assert_eq!(replace_entries.len(), 2);
+    assert_eq!(replace_entries[0]["credential"], "cache-key");
+    assert_eq!(replace_entries[0]["outcome"], "replaced, incarnation 2");
+    let audit_keys = [
+        "seq",
+        "at",
+        "kind",
+        "credential",
+        "resource",
+        "action",
+        "run_id",
+        "outcome",
+    ];
+    for line in &lines {
+        assert_exact_keys(line, &audit_keys);
+    }
+}
+
+#[test]
+fn replace_retire_and_enroll_again_leaves_the_store_readable() {
+    let dir = test_dir("replace-era-boundary");
+    let h = Harness::new();
+    let state = dir.join("state.json");
+    enroll_a(&h, &state);
+    deadbolt::enroll(&state, &h.open(), "other-key", VALUE_C, &[read_scope()], T0).unwrap();
+    let other_receipt =
+        deadbolt::grant(&state, &h.open(), "other-key", &read_scope(), 600, None, T0).unwrap();
+    let (_ended, stood_up) = deadbolt::replace(
+        &state,
+        &h.open(),
+        "cache-key",
+        VALUE_B,
+        &[read_scope(), scope("bucket", "write")],
+        T0 + 10,
+    )
+    .unwrap();
+    assert_eq!(stood_up, 2);
+    let receipt =
+        deadbolt::grant(&state, &h.open(), "cache-key", &read_scope(), 600, None, T0 + 20)
+            .unwrap();
+    let ended = deadbolt::retire(&state, &h.open(), "cache-key", T0 + 30).unwrap();
+    assert_eq!(ended, 1);
+    deadbolt::enroll(
+        &state,
+        &h.open(),
+        "cache-key",
+        VALUE_D,
+        &[read_scope()],
+        T0 + 40,
+    )
+    .unwrap();
+    // The store opens on a fresh read beside the ended grant
+    // carrying incarnation 2 and the standing credential at 1.
+    // This pin fails against any reader that caps a non live
+    // grant at the standing incarnation of its credential.
+    let entries = deadbolt::audit(&state, &h.open(), T0 + 50).unwrap();
+    for (index, entry) in entries.iter().enumerate() {
+        assert_eq!(entry.seq, index as u64 + 1);
+    }
+    let kinds: Vec<&str> = entries.iter().map(|e| e.kind.as_str()).collect();
+    assert_eq!(
+        kinds,
+        ["enroll", "enroll", "grant", "replace", "grant", "retire", "enroll"]
+    );
+    let json = document_json(&h, &state);
+    let standing = json["credentials"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|credential| credential["name"] == "cache-key")
+        .unwrap();
+    assert_eq!(standing["value"], VALUE_D);
+    assert!(standing.get("incarnation").is_none());
+    let ended_grant = json["grants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|grant| grant["id"] == receipt.grant_id)
+        .unwrap();
+    assert_eq!(ended_grant["incarnation"], 2);
+    assert_eq!(ended_grant["ended_at"], T0 + 30);
+    assert_eq!(ended_grant["end_reason"], "retired");
+    assert_eq!(
+        deadbolt::redeem(&state, &h.open(), &other_receipt.token, &read_scope(), T0 + 60)
+            .unwrap(),
+        VALUE_C
+    );
+    let fresh =
+        deadbolt::grant(&state, &h.open(), "cache-key", &read_scope(), 600, None, T0 + 70)
+            .unwrap();
+    assert_eq!(
+        deadbolt::redeem(&state, &h.open(), &fresh.token, &read_scope(), T0 + 71).unwrap(),
+        VALUE_D
+    );
 }
