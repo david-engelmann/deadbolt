@@ -1183,6 +1183,105 @@ pub fn rotate(
     Ok(ended)
 }
 
+/// Replace the value standing under a name in one act, DK-27.
+///
+/// The act ends every grant that stands live against the standing
+/// incarnation with the stamp and the reason of DK-4, and rewrites
+/// the credential record in place with the new value and the named
+/// scopes and the act instant as its enrolled_at and its
+/// incarnation standing one higher than it stood, under the one
+/// lock with one publish. Returns how many grants the act ended
+/// and the incarnation the act stood up. Replacement mints no
+/// grant and no token, and authorisation after the act is by grant
+/// alone, against the new incarnation.
+pub fn replace(
+    state_path: &Path,
+    unlock: &Unlock,
+    name: &str,
+    value: &str,
+    scopes: &[Scope],
+    now: i64,
+) -> Result<(usize, u64), Error> {
+    check_name("credential name", name)?;
+    check_value(value)?;
+    if scopes.is_empty() {
+        return Err(Error::Caller(
+            "a replacement must name at least one scope".to_string(),
+        ));
+    }
+    for scope in scopes {
+        check_scope(scope)?;
+        if scopes.iter().filter(|other| *other == scope).count() > 1 {
+            return Err(Error::Caller(
+                "a replacement must not repeat a scope".to_string(),
+            ));
+        }
+    }
+    check_instant(now)?;
+    let mut session = Session::open(state_path, unlock, now)?;
+    let position = session
+        .state
+        .credentials
+        .iter()
+        .position(|credential| credential.name == name);
+    let position = match position {
+        Some(position) => position,
+        None => {
+            session.record_refusal(
+                now,
+                "replace",
+                Some(name),
+                None,
+                None,
+                "refused, unknown credential".to_string(),
+            )?;
+            return Err(Error::Refusal(format!(
+                "replace refused, no credential named {name} stands"
+            )));
+        }
+    };
+    let standing = session.state.credentials[position].incarnation;
+    let next = match standing.checked_add(1) {
+        Some(next) => next,
+        None => {
+            session.record_refusal(
+                now,
+                "replace",
+                Some(name),
+                None,
+                None,
+                "refused, incarnation exhausted".to_string(),
+            )?;
+            return Err(Error::Refusal(format!(
+                "replace refused, the credential named {name} stands at the last incarnation"
+            )));
+        }
+    };
+    let mut ended = 0;
+    for grant in session.state.grants.iter_mut() {
+        if grant.credential == name && grant.ended_at.is_none() && now < grant.expires_at {
+            grant.ended_at = Some(now);
+            grant.end_reason = Some("retired".to_string());
+            ended += 1;
+        }
+    }
+    let credential = &mut session.state.credentials[position];
+    credential.value = value.to_string();
+    credential.scopes = scopes.to_vec();
+    credential.enrolled_at = now;
+    credential.incarnation = next;
+    session.state.record(
+        now,
+        "replace",
+        Some(name),
+        None,
+        None,
+        format!("replaced, incarnation {next}"),
+    );
+    session.publish()?;
+    Ok((ended, next))
+}
+
 /// Grant one scope of one credential to a caller, DK-5 and DK-6.
 pub fn grant(
     state_path: &Path,
