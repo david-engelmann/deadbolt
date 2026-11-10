@@ -2097,3 +2097,220 @@ fn cli_rotation_round_trip_and_its_output() {
     assert_eq!(pair[1]["credential"], "cache-key");
     assert_eq!(pair[1]["outcome"], "retired, rotation to successor-key");
 }
+
+fn assert_exact_keys(value: &serde_json::Value, expected: &[&str]) {
+    let actual: std::collections::BTreeSet<&str> = value
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    let expected: std::collections::BTreeSet<&str> = expected.iter().copied().collect();
+    assert_eq!(actual, expected);
+}
+
+fn assert_text_key_order(text: &str, start: usize, expected: &[&str]) {
+    let mut position = start;
+    for key in expected {
+        let needle = format!("\"{key}\"");
+        let found = text[position..]
+            .find(&needle)
+            .map(|offset| position + offset)
+            .unwrap_or_else(|| panic!("the key {key} does not stand after byte {position}"));
+        position = found + needle.len();
+    }
+}
+
+#[test]
+fn contract_key_table_matches_the_rendered_document() {
+    let dir = test_dir("contract-key-table");
+    let h = Harness::new();
+    let state = dir.join("state.json");
+    enroll_a(&h, &state);
+    let live = deadbolt::grant(
+        &state,
+        &h.open(),
+        "cache-key",
+        &read_scope(),
+        600,
+        Some("run-1"),
+        T0,
+    )
+    .unwrap();
+    let ended =
+        deadbolt::grant(&state, &h.open(), "cache-key", &read_scope(), 600, None, T0).unwrap();
+    deadbolt::revoke(&state, &h.open(), &ended.grant_id, T0 + 1).unwrap();
+    assert_ne!(live.grant_id, ended.grant_id);
+
+    let text = document_text(&h, &state);
+    let document: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_exact_keys(
+        &document,
+        &["format", "store_id", "credentials", "grants", "audit"],
+    );
+    let store_id = document["store_id"].as_str().unwrap();
+    assert_eq!(store_id.len(), 64);
+    assert!(store_id
+        .chars()
+        .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)));
+    assert_text_key_order(
+        &text,
+        0,
+        &["format", "store_id", "credentials", "grants", "audit"],
+    );
+
+    let credentials = document["credentials"].as_array().unwrap();
+    assert_eq!(credentials.len(), 1);
+    let credential = &credentials[0];
+    assert_exact_keys(credential, &["name", "value", "scopes", "enrolled_at"]);
+    let scopes = credential["scopes"].as_array().unwrap();
+    assert_eq!(scopes.len(), 2);
+    for scope_object in scopes {
+        assert_exact_keys(scope_object, &["resource", "action"]);
+    }
+    let credentials_at = text.find("\"credentials\"").unwrap();
+    assert_text_key_order(
+        &text,
+        credentials_at,
+        &[
+            "name",
+            "value",
+            "scopes",
+            "resource",
+            "action",
+            "enrolled_at",
+        ],
+    );
+
+    let grants = document["grants"].as_array().unwrap();
+    assert_eq!(grants.len(), 2);
+    let grant_keys = [
+        "id",
+        "credential",
+        "resource",
+        "action",
+        "run_id",
+        "token_hash",
+        "granted_at",
+        "expires_at",
+        "ended_at",
+        "end_reason",
+    ];
+    for grant in grants {
+        assert_exact_keys(grant, &grant_keys);
+        let token_hash = grant["token_hash"].as_str().unwrap();
+        assert_eq!(token_hash.len(), 64);
+        assert!(token_hash
+            .chars()
+            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)));
+    }
+    let live_grant = grants
+        .iter()
+        .find(|grant| grant["id"] == live.grant_id)
+        .unwrap();
+    assert_eq!(live_grant["run_id"], "run-1");
+    assert!(live_grant["ended_at"].is_null());
+    assert!(live_grant["end_reason"].is_null());
+    let ended_grant = grants
+        .iter()
+        .find(|grant| grant["id"] == ended.grant_id)
+        .unwrap();
+    assert!(ended_grant["run_id"].is_null());
+    assert_eq!(ended_grant["ended_at"], T0 + 1);
+    assert_eq!(ended_grant["end_reason"], "revoked");
+    let grants_at = text.find("\"grants\"").unwrap();
+    assert_text_key_order(&text, grants_at, &grant_keys);
+    let first_grant_end = text[grants_at..]
+        .find("\"end_reason\"")
+        .map(|offset| grants_at + offset)
+        .unwrap();
+    assert_text_key_order(&text, first_grant_end, &grant_keys);
+
+    let audit = document["audit"].as_array().unwrap();
+    assert_eq!(audit.len(), 4);
+    let audit_keys = [
+        "seq",
+        "at",
+        "kind",
+        "credential",
+        "resource",
+        "action",
+        "run_id",
+        "outcome",
+    ];
+    for entry in audit {
+        assert_exact_keys(entry, &audit_keys);
+    }
+    assert_eq!(audit[0]["kind"], "enroll");
+    assert!(audit[0]["resource"].is_null());
+    assert!(audit[0]["action"].is_null());
+    assert!(audit[0]["run_id"].is_null());
+    assert_eq!(audit[1]["run_id"], "run-1");
+    assert!(audit[2]["run_id"].is_null());
+    assert_eq!(audit[3]["kind"], "revoke");
+    assert_eq!(audit[3]["credential"], "cache-key");
+    assert_eq!(audit[3]["resource"], "bucket");
+    assert_eq!(audit[3]["action"], "read");
+    assert!(audit[3]["run_id"].is_null());
+    let audit_at = text.find("\"audit\"").unwrap();
+    assert_text_key_order(&text, audit_at, &audit_keys);
+
+    let mut unstamped = document.clone();
+    let unstamped_object = unstamped.as_object_mut().unwrap();
+    unstamped_object.remove("store_id");
+    let plain_state = dir.join("plain.json");
+    std::fs::write(&plain_state, unstamped.to_string()).unwrap();
+    set_mode(&plain_state, 0o600);
+    let plain_text = state_text(&plain_state);
+    let plain_document: serde_json::Value = serde_json::from_str(&plain_text).unwrap();
+    assert!(plain_document.get("store_id").is_none());
+    assert_exact_keys(
+        &plain_document,
+        &["format", "credentials", "grants", "audit"],
+    );
+}
+
+#[test]
+fn audit_output_carries_exactly_the_contract_audit_fields() {
+    let dir = test_dir("audit-output-fields");
+    let state = dir.join("state.json");
+    let state_arg = state.to_string_lossy().into_owned();
+    let (_token, _grant_id) = cli_enroll_and_grant(&dir);
+    let successor_file = dir.join("value2.txt");
+    std::fs::write(&successor_file, format!("{VALUE_B}\n")).unwrap();
+    let successor_arg = successor_file.to_string_lossy().into_owned();
+    let out = run_cli_pp(&[
+        "--state",
+        &state_arg,
+        "rotate",
+        "--name",
+        "cache-key",
+        "--new-name",
+        "successor-key",
+        "--value-file",
+        &successor_arg,
+        "--scope",
+        "bucket:read",
+    ]);
+    assert_eq!(out.status, 0, "{}", out.stderr);
+
+    let out = run_cli_pp(&["--state", &state_arg, "audit"]);
+    assert_eq!(out.status, 0, "{}", out.stderr);
+    let lines: Vec<&str> = out.stdout.lines().collect();
+    assert_eq!(lines.len(), 4);
+    let audit_keys = [
+        "seq",
+        "at",
+        "kind",
+        "credential",
+        "resource",
+        "action",
+        "run_id",
+        "outcome",
+    ];
+    for line in lines {
+        let entry: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert_exact_keys(&entry, &audit_keys);
+        assert_text_key_order(line, 0, &audit_keys);
+    }
+}
