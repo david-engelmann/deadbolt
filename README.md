@@ -234,7 +234,7 @@ deadbolt --state usage.json audit
 
 ## Status
 
-The broker works end to end through the command line and the library against one state file. Enrollment, grant, redeem, revoke, cutoff, retire, rotation, and the audit read all stand landed and tested. The state file holds the deadbolt-state/1 document inside a deadbolt-envelope/1 envelope, sealed with XChaCha20-Poly1305 under a fresh random 24 byte nonce per write, with the header bytes authenticated as written. The unlock key stands in the operating system keychain on macOS, in the Windows credential store, and in Linux Secret Service. Where no keychain service answers, the passphrase route is the fallback, its key derived from a per-session passphrase with Argon2id and never stored. The state file is owner only, and the broker refuses to operate on it when its mode grants anyone else access.
+The broker works end to end through the command line and the library against one state file. Enrollment, grant, redeem, revoke, cutoff, retire, rotation, replacement, and the audit read all stand landed and tested. The state file holds the deadbolt-state/1 document inside a deadbolt-envelope/1 envelope, sealed with XChaCha20-Poly1305 under a fresh random 24 byte nonce per write, with the header bytes authenticated as written. The unlock key stands in the operating system keychain on macOS, in the Windows credential store, and in Linux Secret Service. Where no keychain service answers, the passphrase route is the fallback, its key derived from a per-session passphrase with Argon2id and never stored. The state file is owner only, and the broker refuses to operate on it when its mode grants anyone else access.
 
 What does not stand proven. The keychain route is verified at the custody seam and against platform probes, not against a live keychain service, because no keychain daemon runs in the build environment or in continuous integration. That residue stands named in the contract as DK-24. A store whose key is lost does not open, and deadbolt offers no recovery for a lost keychain entry or a forgotten passphrase, and no way to move a store between routes or rekey one in place.
 
@@ -242,7 +242,7 @@ What is not built. Deadbolt has no daemon, no network service, and no Python bin
 
 Closed perfection rounds are 5 of 100. A round counts only when a full cycle of work and audit and review and red team and approval has closed, and seeding and setup are not rounds.
 
-The contract lives in CONTRACT.md, where obligations DK-1 to DK-26 state the broker semantics, the limits, and the custody and envelope rules.
+The contract lives in CONTRACT.md, where obligations DK-1 to DK-27 state the broker semantics, the limits, and the custody and envelope rules.
 
 The remote seed was verified on 2026-11-02 against the staged seed and its commit is 08a05b881350c6ca5eb8a42af28d25f194c6d039, a parentless commit holding exactly README.md and LICENSE and .gitignore.
 

@@ -6,7 +6,7 @@
 //! key the custody module holds. Every change is published by atomic
 //! rename under one exclusive advisory lock, and the state file mode
 //! is gated on every open. The obligations this code answers to are
-//! DK-1 to DK-25 in CONTRACT.md.
+//! DK-1 to DK-27 in CONTRACT.md.
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
