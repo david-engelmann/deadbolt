@@ -240,7 +240,7 @@ What does not stand proven. The keychain route is verified at the custody seam a
 
 What is not built. Deadbolt has no daemon, no network service, and no Python binding, and the binding absence is by design. Nothing watches the state file, and a grant is judged at the instant a redeem presents it, so expiry needs no timer.
 
-Closed perfection rounds are 8 of 100. A round counts only when a full cycle of work and audit and review and red team and approval has closed, and seeding and setup are not rounds.
+Closed perfection rounds are 9 of 100. A round counts only when a full cycle of work and audit and review and red team and approval has closed, and seeding and setup are not rounds.
 
 The contract lives in CONTRACT.md, where obligations DK-1 to DK-27 state the broker semantics, the limits, and the custody and envelope rules.
 
