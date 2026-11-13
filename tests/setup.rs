@@ -86,11 +86,11 @@ fn status_section(text: &str) -> &str {
 }
 
 #[test]
-fn readme_status_states_thirty_seven_of_one_hundred() {
+fn readme_status_states_thirty_eight_of_one_hundred() {
     let text = read("README.md");
     assert!(text.contains("## Status"));
     let status = status_section(&text);
-    assert!(status.contains("Closed perfection rounds are 37 of 100."));
+    assert!(status.contains("Closed perfection rounds are 38 of 100."));
     assert!(status.contains("08a05b881350c6ca5eb8a42af28d25f194c6d039"));
 }
 
