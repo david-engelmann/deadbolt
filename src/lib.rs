@@ -822,7 +822,20 @@ impl<'a> Session<'a> {
                         None,
                         format!("adopted, {} route", route.name()),
                     );
-                    prove_adoption(&state, &header, &key)?;
+                    // A handled failure after the key was stored
+                    // removes it again, audit finding DK-A2. DK-23
+                    // accepts the residue of an adoption that
+                    // crashes before publishing; a failure this
+                    // code survives with an error in hand is not
+                    // that case. The removal is best effort,
+                    // because the failure is the error the caller
+                    // must see.
+                    if let Err(err) = prove_adoption(&state, &header, &key) {
+                        if route == Route::Keychain {
+                            let _ = unlock.custody.delete_key(&header.store);
+                        }
+                        return Err(err);
+                    }
                     let mut session = Session {
                         state_path: state_path.to_path_buf(),
                         state,
@@ -831,7 +844,12 @@ impl<'a> Session<'a> {
                         unlock,
                         _lock: lock,
                     };
-                    session.publish()?;
+                    if let Err(err) = session.publish() {
+                        if route == Route::Keychain {
+                            let _ = unlock.custody.delete_key(&session.state.store_id);
+                        }
+                        return Err(err);
+                    }
                     Ok(session)
                 }
             }
@@ -858,6 +876,7 @@ impl<'a> Session<'a> {
     /// file is written and an act that never publishes creates
     /// nothing.
     fn publish(&mut self) -> Result<(), Error> {
+        let mut established_store: Option<String> = None;
         if let Sealing::Uncreated { route } = &self.sealing {
             let route = route.ok_or_else(|| {
                 Error::Caller(
@@ -867,8 +886,33 @@ impl<'a> Session<'a> {
             })?;
             let unlock = self.unlock;
             let (header, key) = establish_custody(route, unlock, &mut self.state)?;
+            if route == Route::Keychain {
+                established_store = Some(header.store.clone());
+            }
             self.sealing = Sealing::Sealed { header, key };
         }
+        let result = self.publish_sealed();
+        if result.is_err() {
+            // A publish that fails after this call established
+            // custody on the keychain route removes the key it
+            // stored, audit finding DK-A2: the store was never
+            // created, so no later act can ever reach the entry,
+            // and leaving it would orphan a live unlock key under
+            // an identifier nothing references. The removal is
+            // best effort, because the publish error is the error
+            // the caller must see.
+            if let Some(store_id) = &established_store {
+                let _ = self.unlock.custody.delete_key(store_id);
+            }
+        }
+        result
+    }
+
+    /// Publish a document whose custody already stands: seal it
+    /// and rename it over the state file. publish above is the
+    /// only caller, and it owns custody establishment and the
+    /// cleanup a failed first publish owes.
+    fn publish_sealed(&mut self) -> Result<(), Error> {
         let (header, key) = match &self.sealing {
             Sealing::Sealed { header, key } => (header, key),
             Sealing::Uncreated { .. } => {
