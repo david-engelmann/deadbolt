@@ -350,9 +350,24 @@ fn run(args: &[String]) -> Result<String, Error> {
             let credential = options.required("--credential")?;
             let scope = parse_scope(&options.required("--scope")?)?;
             let ttl_text = options.required("--ttl")?;
-            let ttl: u64 = ttl_text
-                .parse()
-                .map_err(|_| caller("the time to live is not a whole number of seconds"))?;
+            let ttl: u64 = ttl_text.parse().map_err(|_| {
+                // A text of digits alone that fails the parse has
+                // overflowed the type. It is a whole number standing
+                // outside the accepted range, so it draws the range
+                // wording the library speaks for that condition,
+                // audit finding DK-A25.
+                let overflowed = !ttl_text.is_empty()
+                    && ttl_text.bytes().all(|byte| byte.is_ascii_digit());
+                if overflowed {
+                    Error::Caller(format!(
+                        "the time to live must stand from {} to {} seconds",
+                        deadbolt::TTL_MIN,
+                        deadbolt::TTL_MAX
+                    ))
+                } else {
+                    caller("the time to live is not a whole number of seconds")
+                }
+            })?;
             let run = options.one("--run")?;
             let receipt = deadbolt::grant(
                 &state,
