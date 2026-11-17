@@ -19,7 +19,7 @@ mod common;
 
 use common::{decrypt_document, hex, hex_bytes, read_scope, set_mode, state_text};
 use deadbolt::custody::{CustodyLoad, FixtureCustody, KeyCustody, StoreKey};
-use deadbolt::{Error, PassphraseSource, Route, Scope, Unlock, Zeroizing};
+use deadbolt::{Error, PassphraseSource, Route, Unlock, Zeroizing};
 
 const VALUE: &str = "SYNTHETIC-TEST-VALUE-quiet-foxglove-7341";
 const PASSPHRASE: &str = "SYNTHETIC-TEST-VALUE-copper-lantern-9911";
