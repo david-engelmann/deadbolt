@@ -705,6 +705,35 @@ fn establish_custody(
     }
 }
 
+/// Render a document and seal it in its envelope under a header
+/// and a key.
+///
+/// Every seal of a document in this crate is this one sequence,
+/// the pretty rendering with its trailing newline under the one
+/// serialization wording, so the rendering discipline stands in
+/// exactly one place.
+fn seal_document(state: &State, header: &Header, key: &StoreKey) -> Result<String, Error> {
+    let text = serde_json::to_string_pretty(state).map_err(|_| {
+        Error::Corrupt("the state could not be written in its own format".to_string())
+    })?;
+    envelope::seal(header, key, format!("{text}\n").as_bytes())
+}
+
+/// Open a sealed envelope and strictly read the document inside
+/// it.
+///
+/// Every read of a sealed document in this crate is this one
+/// sequence, the opening, the UTF-8 conversion under the one
+/// wording, and the strict read, so the reading discipline stands
+/// in exactly one place.
+fn open_document(sealed: &envelope::Sealed, key: &StoreKey) -> Result<State, Error> {
+    let plain = envelope::open_sealed(sealed, key)?;
+    let plain_text = String::from_utf8(plain).map_err(|_| {
+        Error::Corrupt("the state document inside the envelope is not valid UTF-8 text".to_string())
+    })?;
+    parse_state(&plain_text)
+}
+
 /// Prove a freshly sealed adoption envelope in memory, DK-23.
 ///
 /// The proof seals the loaded document, decrypts the rendering,
@@ -713,16 +742,9 @@ fn establish_custody(
 /// publish, so a failed proof leaves the plaintext standing exactly
 /// as it stood.
 fn prove_adoption(state: &State, header: &Header, key: &StoreKey) -> Result<(), Error> {
-    let text = serde_json::to_string_pretty(state).map_err(|_| {
-        Error::Corrupt("the state could not be written in its own format".to_string())
-    })?;
-    let rendered = envelope::seal(header, key, format!("{text}\n").as_bytes())?;
+    let rendered = seal_document(state, header, key)?;
     let sealed = envelope::parse_envelope(&rendered)?;
-    let plain = envelope::open_sealed(&sealed, key)?;
-    let plain_text = String::from_utf8(plain).map_err(|_| {
-        Error::Corrupt("the state document inside the envelope is not valid UTF-8 text".to_string())
-    })?;
-    let proven = parse_state(&plain_text)?;
+    let proven = open_document(&sealed, key)?;
     if !state_documents_equal(state, &proven) {
         return Err(Error::Corrupt(
             "the adopted envelope does not decrypt to the document it was sealed from".to_string(),
@@ -794,14 +816,7 @@ impl<'a> Session<'a> {
                         ));
                     }
                     let key = unlock_key(&sealed, unlock)?;
-                    let plain = envelope::open_sealed(&sealed, &key)?;
-                    let plain_text = String::from_utf8(plain).map_err(|_| {
-                        Error::Corrupt(
-                            "the state document inside the envelope is not valid UTF-8 text"
-                                .to_string(),
-                        )
-                    })?;
-                    let state = parse_state(&plain_text)?;
+                    let state = open_document(&sealed, &key)?;
                     match sealed.header.route {
                         Route::Keychain => {
                             if state.store_id != sealed.header.store {
@@ -941,10 +956,7 @@ impl<'a> Session<'a> {
                 ))
             }
         };
-        let text = serde_json::to_string_pretty(&self.state).map_err(|_| {
-            Error::Corrupt("the state could not be written in its own format".to_string())
-        })?;
-        let sealed_text = envelope::seal(header, key, format!("{text}\n").as_bytes())?;
+        let sealed_text = seal_document(&self.state, header, key)?;
         let directory = self
             .state_path
             .parent()
