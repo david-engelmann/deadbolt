@@ -359,6 +359,17 @@ fn parse_state(text: &str) -> Result<State, Error> {
             }
         }
     }
+    // The live grant check below resolves the credential each
+    // live grant names. The loop above has already refused any
+    // name standing twice, so the names stand proven unique here,
+    // and a map built once answers for every grant exactly what a
+    // search of the vector would answer, at one lookup per grant
+    // instead of one search per grant, audit finding DK-A36.
+    let credentials_by_name: std::collections::HashMap<&str, &Credential> = state
+        .credentials
+        .iter()
+        .map(|credential| (credential.name.as_str(), credential))
+        .collect();
     let mut ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
     let mut hashes: std::collections::HashSet<&str> = std::collections::HashSet::new();
     // Live in DK-2 carries the meaning DK-7 gives it, judged against
@@ -406,11 +417,7 @@ fn parse_state(text: &str) -> Result<State, Error> {
                     // not stand, and no upper bound stands on it,
                     // because a name retired and enrolled again
                     // begins again at 1 beside its ended grants.
-                    match state
-                        .credentials
-                        .iter()
-                        .find(|credential| credential.name == grant.credential)
-                    {
+                    match credentials_by_name.get(grant.credential.as_str()).copied() {
                         None => {
                             return Err(Error::Corrupt(
                                 "a live grant in the state file names a credential that does not stand"
