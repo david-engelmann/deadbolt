@@ -179,7 +179,7 @@ fn passphrase_document_text(ctx: &Ctx, state: &PathBuf) -> String {
     let salt = hex_bytes(envelope["header"]["kdf"]["salt"].as_str().unwrap());
     let salt: [u8; 16] = salt.try_into().unwrap();
     let passphrase = ctx.supply.passphrase().unwrap();
-    let key = deadbolt::custody::derive_key(&passphrase, &salt);
+    let key = deadbolt::custody::derive_key(&passphrase, &salt).unwrap();
     decrypt_document(&raw, &key)
 }
 
@@ -576,18 +576,20 @@ fn envelope_corruption_answers_ahead_of_any_custody_outcome() {
 #[test]
 fn derive_key_with_params_honors_the_recorded_parameters() {
     let salt = [4u8; 16];
-    let pinned = deadbolt::custody::derive_key(PASSPHRASE.as_bytes(), &salt);
+    let pinned = deadbolt::custody::derive_key(PASSPHRASE.as_bytes(), &salt).unwrap();
     let at_pinned = deadbolt::custody::derive_key_with_params(
         PASSPHRASE.as_bytes(),
         &salt,
         deadbolt::custody::ARGON2_MEMORY_KIB,
         deadbolt::custody::ARGON2_TIME,
-    );
+    )
+    .unwrap();
     assert_eq!(pinned, at_pinned);
-    let lighter = deadbolt::custody::derive_key_with_params(PASSPHRASE.as_bytes(), &salt, 8_192, 1);
+    let lighter =
+        deadbolt::custody::derive_key_with_params(PASSPHRASE.as_bytes(), &salt, 8_192, 1).unwrap();
     assert_ne!(pinned, lighter);
     let lighter_again =
-        deadbolt::custody::derive_key_with_params(PASSPHRASE.as_bytes(), &salt, 8_192, 1);
+        deadbolt::custody::derive_key_with_params(PASSPHRASE.as_bytes(), &salt, 8_192, 1).unwrap();
     assert_eq!(lighter, lighter_again);
 }
 
@@ -739,7 +741,7 @@ fn a_transplanted_document_refuses_as_locked() {
     let pp_envelope = envelope_json(&pp_state);
     let salt = hex_bytes(pp_envelope["header"]["kdf"]["salt"].as_str().unwrap());
     let salt: [u8; 16] = salt.try_into().unwrap();
-    let pp_key = deadbolt::custody::derive_key(PASSPHRASE.as_bytes(), &salt);
+    let pp_key = deadbolt::custody::derive_key(PASSPHRASE.as_bytes(), &salt).unwrap();
     let sealed = seal_text(&pp_envelope["header"], &pp_key, &document_a);
     let standing = write_store_file(&test_dir("transplant-standing-pp"), &sealed);
     let err = deadbolt::audit(&standing, &ctx.open(), T0).unwrap_err();

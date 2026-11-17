@@ -612,12 +612,12 @@ fn unlock_key(sealed: &Sealed, unlock: &Unlock) -> Result<StoreKey, Error> {
                     "the envelope header field set does not match its route".to_string(),
                 )
             })?;
-            Ok(derive_key_with_params(
-                &passphrase,
-                &kdf.salt,
-                kdf.memory,
-                kdf.time,
-            ))
+            derive_key_with_params(&passphrase, &kdf.salt, kdf.memory, kdf.time).map_err(|_| {
+                Error::Corrupt(
+                    "the envelope header records KDF parameters the derivation refuses"
+                        .to_string(),
+                )
+            })
         }
     }
 }
@@ -665,7 +665,8 @@ fn establish_custody(
             let mut salt = [0u8; SALT_LEN];
             getrandom::fill(&mut salt)
                 .map_err(|_| Error::Io(std::io::Error::other("the random source refused")))?;
-            let key = derive_key(&passphrase, &salt);
+            let key = derive_key(&passphrase, &salt)
+                .map_err(|_| Error::Io(std::io::Error::other("the key derivation failed")))?;
             let store_id = random_hex(32)?;
             state.store_id = String::new();
             Ok((

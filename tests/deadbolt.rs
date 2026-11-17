@@ -175,7 +175,7 @@ fn cli_document_json(state: &PathBuf) -> serde_json::Value {
     let envelope: serde_json::Value = serde_json::from_str(&raw).unwrap();
     let salt = hex_bytes(envelope["header"]["kdf"]["salt"].as_str().unwrap());
     let salt: [u8; 16] = salt.try_into().unwrap();
-    let key = deadbolt::custody::derive_key(CLI_PASSPHRASE.as_bytes(), &salt);
+    let key = deadbolt::custody::derive_key(CLI_PASSPHRASE.as_bytes(), &salt).unwrap();
     serde_json::from_str(&decrypt_document(&raw, &key)).unwrap()
 }
 
@@ -2317,7 +2317,7 @@ fn contract_key_table_matches_the_rendered_document() {
     let envelope: serde_json::Value = serde_json::from_str(&raw).unwrap();
     let salt = hex_bytes(envelope["header"]["kdf"]["salt"].as_str().unwrap());
     let salt: [u8; 16] = salt.try_into().unwrap();
-    let key = deadbolt::custody::derive_key(STORE_PASSPHRASE.as_bytes(), &salt);
+    let key = deadbolt::custody::derive_key(STORE_PASSPHRASE.as_bytes(), &salt).unwrap();
     let plain_text = decrypt_document(&raw, &key);
     let plain_document: serde_json::Value = serde_json::from_str(&plain_text).unwrap();
     assert!(plain_document.get("store_id").is_none());
