@@ -183,7 +183,8 @@ fn plaintext_store(dir: &Path) -> PathBuf {
     let envelope: serde_json::Value = serde_json::from_str(&raw).unwrap();
     let salt = hex_bytes(envelope["header"]["kdf"]["salt"].as_str().unwrap());
     let salt: [u8; 16] = salt.try_into().unwrap();
-    let key = deadbolt::custody::derive_key(PASSPHRASE.as_bytes(), &salt);
+    let key = deadbolt::custody::derive_key(PASSPHRASE.as_bytes(), &salt)
+        .expect("the pinned parameters derive a key");
     let document = decrypt_document(&raw, &key);
     let state = dir.join("state.json");
     std::fs::write(&state, document).unwrap();
