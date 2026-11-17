@@ -37,16 +37,22 @@ pub const ARGON2_LANES: u32 = 1;
 pub const ARGON2_MEMORY_MIN_KIB: u32 = 8_192;
 
 /// The highest Argon2id memory cost in kibibytes the reader accepts
-/// under DK-19. A header naming more is corruption under DK-17,
-/// because a hostile header must not name a derivation the machine
-/// cannot pay.
-pub const ARGON2_MEMORY_MAX_KIB: u32 = 1_048_576;
+/// under DK-19, four times the pinned writer cost. A header naming
+/// more is corruption under DK-17, because a hostile header must
+/// not name a derivation the machine cannot pay: audit Round 3
+/// measured the old ceiling of 1,048,576 KiB at a full gibibyte of
+/// resident memory and roughly one hundred seconds of derivation
+/// before any authentication, under the store's exclusive lock,
+/// finding DK-A5.
+pub const ARGON2_MEMORY_MAX_KIB: u32 = 262_144;
 
 /// The lowest Argon2id time cost the reader accepts under DK-19.
 pub const ARGON2_TIME_MIN: u32 = 1;
 
-/// The highest Argon2id time cost the reader accepts under DK-19.
-pub const ARGON2_TIME_MAX: u32 = 10;
+/// The highest Argon2id time cost the reader accepts under DK-19,
+/// twice the pinned writer cost, tightened with the memory ceiling
+/// by audit finding DK-A5.
+pub const ARGON2_TIME_MAX: u32 = 6;
 
 /// The service name every keychain entry for this crate is stored under.
 pub const KEYCHAIN_SERVICE: &str = "deadbolt";
