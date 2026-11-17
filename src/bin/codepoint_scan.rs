@@ -22,6 +22,12 @@
 //! scanned, whatever its name or suffix, apart from the known
 //! binary suffixes, and a file that does not decode as UTF-8 fails
 //! the scan loudly instead of passing unseen.
+//!
+//! Only regular files are collected for reading, where a symlink
+//! counts exactly when its target is a regular file, audit
+//! finding DK-A3. A FIFO, a socket, or a device file is skipped,
+//! because a read on one can block forever, and a gate step must
+//! always terminate with a verdict.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -66,7 +72,7 @@ fn collect(root: &Path, out: &mut Vec<PathBuf>) -> Result<(), ScanError> {
             .map_err(|err| ScanError(format!("cannot read {}, {err}", path.display())))?;
         if file_type.is_dir() {
             dirs.push(path);
-        } else if !file_type.is_symlink() || !path.is_dir() {
+        } else if file_type.is_file() || (file_type.is_symlink() && path.is_file()) {
             files.push(path);
         }
     }
