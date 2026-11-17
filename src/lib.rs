@@ -174,11 +174,27 @@ pub struct Scope {
 }
 
 /// What a successful grant hands back, exactly once.
-#[derive(Debug)]
+///
+/// The Debug form is written by hand in the StoreKey pattern of
+/// the custody module: it prints the grant id and the expiry
+/// instant and stands the token as redacted, because the token
+/// is the one value DK-6 and DK-10 confine to a single
+/// appearance and secret material never prints, audit finding
+/// DK-A8.
 pub struct GrantReceipt {
     pub grant_id: String,
     pub token: String,
     pub expires_at: i64,
+}
+
+impl std::fmt::Debug for GrantReceipt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GrantReceipt")
+            .field("grant_id", &self.grant_id)
+            .field("token", &"<redacted>")
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
 }
 
 /// One audit entry. Entries never carry a value, a token, or a token

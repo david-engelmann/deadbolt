@@ -117,11 +117,21 @@ fn scan(root: &Path) -> Result<(usize, usize), ScanError> {
     Ok((em_count, en_count))
 }
 
+/// The scan root is the call's one optional argument, converted
+/// strictly from its operating system form, audit finding DK-A9.
+/// An argument that is not valid Unicode text is a scan error at
+/// exit 2, where std::env::args() panicked and exited 101 before.
 fn main() -> ExitCode {
-    let root = std::env::args()
-        .nth(1)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
+    let root = match std::env::args_os().nth(1) {
+        Some(arg) => match arg.into_string() {
+            Ok(text) => PathBuf::from(text),
+            Err(_) => {
+                eprintln!("scan error, an argument is not valid Unicode text");
+                return ExitCode::from(2);
+            }
+        },
+        None => PathBuf::from("."),
+    };
     match scan(&root) {
         Ok((em_count, en_count)) => {
             println!("em dash U+2014 count {em_count}");
