@@ -176,6 +176,16 @@ impl Options {
                 let value = args.get(index + 1).ok_or_else(|| {
                     caller("an option that takes a value stands with no value after it")
                 })?;
+                // A token naming an option this command itself
+                // offers is not a value, so the option stands with
+                // no value after it, audit finding DK-A10. A value
+                // that merely begins with hyphens and names no
+                // offered option still parses as a value.
+                if valued.contains(&value.as_str()) || flags.contains(&value.as_str()) {
+                    return Err(caller(
+                        "an option that takes a value stands with no value after it",
+                    ));
+                }
                 options.pairs.push((arg.clone(), value.clone()));
                 index += 2;
             } else if flags.contains(&arg.as_str()) {
