@@ -24,8 +24,7 @@ use deadbolt::custody::{CustodyError, CustodyLoad, StoreKey};
 use deadbolt::{Error, PassphraseSource, Route, Scope, Unlock, Zeroizing};
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    match run(&args) {
+    match collect_args().and_then(|args| run(&args)) {
         Ok(output) => {
             print!("{output}");
             ExitCode::from(0)
@@ -35,6 +34,21 @@ fn main() -> ExitCode {
             ExitCode::from(exit_code(&err))
         }
     }
+}
+
+/// The call's arguments, read through the operating system form
+/// and converted strictly, audit finding DK-A9. An argument that
+/// is not valid Unicode text is a caller error, so every error
+/// stays one line on standard error inside the DK-13 taxonomy
+/// where std::env::args() panicked and exited 101.
+fn collect_args() -> Result<Vec<String>, Error> {
+    std::env::args_os()
+        .skip(1)
+        .map(|arg| {
+            arg.into_string()
+                .map_err(|_| caller("an argument is not valid Unicode text"))
+        })
+        .collect()
 }
 
 fn exit_code(err: &Error) -> u8 {
