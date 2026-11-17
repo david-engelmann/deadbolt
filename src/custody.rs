@@ -162,7 +162,9 @@ pub trait KeyCustody: Send + Sync {
 /// The derivation is the whole of the passphrase route's custody. It
 /// runs on every load, its output is never stored anywhere, and the
 /// salt travels with the envelope header rather than with the service.
-pub fn derive_key(passphrase: &[u8], salt: &[u8; SALT_LEN]) -> StoreKey {
+/// A derivation failure is an error the caller maps into its own
+/// taxonomy, never a panic, audit finding DK-A1.
+pub fn derive_key(passphrase: &[u8], salt: &[u8; SALT_LEN]) -> Result<StoreKey, CustodyError> {
     derive_key_with_params(passphrase, salt, ARGON2_MEMORY_KIB, ARGON2_TIME)
 }
 
@@ -171,23 +173,25 @@ pub fn derive_key(passphrase: &[u8], salt: &[u8; SALT_LEN]) -> StoreKey {
 /// A standing envelope records the parameters its writer used, and
 /// the reader honors the recorded parameters inside the range DK-19
 /// accepts, so opening a store derives at what its header states
-/// rather than at the pinned writer constants. Callers pass only
-/// parameters inside that range, which the envelope reader has
-/// already refused as corruption outside it.
+/// rather than at the pinned writer constants. Parameters the
+/// derivation itself refuses, and a derivation that fails, return
+/// as a CustodyError, audit finding DK-A1: this function stands on
+/// the open path, where its parameters arrive from a header read
+/// off disk, and the broker never panics on input it read.
 pub fn derive_key_with_params(
     passphrase: &[u8],
     salt: &[u8; SALT_LEN],
     memory_kib: u32,
     time: u32,
-) -> StoreKey {
+) -> Result<StoreKey, CustodyError> {
     let params = Params::new(memory_kib, time, ARGON2_LANES, Some(KEY_LEN))
-        .expect("the Argon2id parameters are valid");
+        .map_err(|_| CustodyError::new("the Argon2id parameters are invalid"))?;
     let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let mut out = Zeroizing::new([0u8; KEY_LEN]);
     argon
         .hash_password_into(passphrase, salt, &mut *out)
-        .expect("the Argon2id key derivation failed");
-    StoreKey::from_zeroizing(out)
+        .map_err(|_| CustodyError::new("the Argon2id key derivation failed"))?;
+    Ok(StoreKey::from_zeroizing(out))
 }
 
 /// Convert a secret the keyring crate returned into a store key,
@@ -235,7 +239,8 @@ impl PassphraseCustody {
 
 impl KeyCustody for PassphraseCustody {
     fn store_key(&self, _store_id: &str, key: &StoreKey) -> Result<(), CustodyError> {
-        if derive_key(self.passphrase.as_bytes(), &self.salt) == *key {
+        let derived = derive_key(self.passphrase.as_bytes(), &self.salt)?;
+        if derived == *key {
             Ok(())
         } else {
             Err(CustodyError::new(
@@ -245,7 +250,10 @@ impl KeyCustody for PassphraseCustody {
     }
 
     fn load_key(&self, _store_id: &str) -> CustodyLoad {
-        CustodyLoad::Key(derive_key(self.passphrase.as_bytes(), &self.salt))
+        match derive_key(self.passphrase.as_bytes(), &self.salt) {
+            Ok(key) => CustodyLoad::Key(key),
+            Err(err) => CustodyLoad::ServiceFailure(err.to_string()),
+        }
     }
 
     fn delete_key(&self, _store_id: &str) -> Result<(), CustodyError> {

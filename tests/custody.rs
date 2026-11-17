@@ -9,8 +9,8 @@
 #[cfg(target_os = "linux")]
 use deadbolt::custody::platform_custody;
 use deadbolt::custody::{
-    derive_key, store_key_from_secret, CustodyLoad, FixtureCustody, KeyCustody, PassphraseCustody,
-    StoreKey,
+    derive_key, derive_key_with_params, store_key_from_secret, CustodyLoad, FixtureCustody,
+    KeyCustody, PassphraseCustody, StoreKey,
 };
 use zeroize::Zeroizing;
 
@@ -135,13 +135,13 @@ fn passphrase_load_derives_the_same_key_on_every_load() {
     assert_eq!(first, second);
     assert_eq!(
         first,
-        derive_key(b"SYNTHETIC-TEST-VALUE-passphrase", &PROBE_SALT)
+        derive_key(b"SYNTHETIC-TEST-VALUE-passphrase", &PROBE_SALT).unwrap()
     );
 }
 
 #[test]
 fn passphrase_derivation_matches_the_recorded_probe_vector() {
-    let derived = derive_key(PROBE_PASSPHRASE, &PROBE_SALT);
+    let derived = derive_key(PROBE_PASSPHRASE, &PROBE_SALT).unwrap();
     assert_eq!(hex(derived.as_bytes()), DERIVATION_VECTOR_HEX);
 }
 
@@ -151,7 +151,7 @@ fn passphrase_store_accepts_the_derived_key_and_refuses_any_other() {
         Zeroizing::new("SYNTHETIC-TEST-VALUE-passphrase".to_string()),
         PROBE_SALT,
     );
-    let derived = derive_key(b"SYNTHETIC-TEST-VALUE-passphrase", &PROBE_SALT);
+    let derived = derive_key(b"SYNTHETIC-TEST-VALUE-passphrase", &PROBE_SALT).unwrap();
     custody.store_key(STORE_ID, &derived).unwrap();
     let err = custody.store_key(STORE_ID, &other_key()).unwrap_err();
     assert!(
@@ -207,4 +207,29 @@ fn secret_conversion_refuses_a_wrong_length_and_still_zeroes() {
     let mut secret = vec![0xa5u8; 16];
     assert!(store_key_from_secret(&mut secret).is_none());
     assert!(secret.iter().all(|byte| *byte == 0));
+}
+
+// Audit finding DK-A1: derivation answers an error, never a panic.
+// Before the fix both calls below panicked inside the derivation,
+// the first at the parameter construction and the second at the
+// same place, so these pins could not pass against the old code.
+
+#[test]
+fn derive_key_with_params_refuses_zero_memory() {
+    let err = derive_key_with_params(PROBE_PASSPHRASE, &PROBE_SALT, 0, 3).unwrap_err();
+    assert!(err.to_string().contains("parameters"), "{err}");
+}
+
+#[test]
+fn derive_key_with_params_refuses_zero_time() {
+    let err = derive_key_with_params(PROBE_PASSPHRASE, &PROBE_SALT, 8_192, 0).unwrap_err();
+    assert!(err.to_string().contains("parameters"), "{err}");
+}
+
+#[test]
+fn derive_key_derives_at_the_pinned_parameters() {
+    let derived = derive_key(PROBE_PASSPHRASE, &PROBE_SALT).unwrap();
+    let at_pinned = derive_key_with_params(PROBE_PASSPHRASE, &PROBE_SALT, 65_536, 3).unwrap();
+    assert_eq!(derived, at_pinned);
+    assert_eq!(hex(derived.as_bytes()), DERIVATION_VECTOR_HEX);
 }
