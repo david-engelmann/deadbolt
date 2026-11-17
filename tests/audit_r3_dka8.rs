@@ -65,16 +65,8 @@ fn grant_receipt_debug_never_prints_the_token() {
         custody: &custody,
         passphrase: &supply,
     };
-    let receipt = deadbolt::grant(
-        &state,
-        &opening,
-        "cache-key",
-        &read_scope(),
-        600,
-        None,
-        T0,
-    )
-    .unwrap();
+    let receipt =
+        deadbolt::grant(&state, &opening, "cache-key", &read_scope(), 600, None, T0).unwrap();
     let rendered = format!("{receipt:?}");
     assert!(
         !rendered.contains(&receipt.token),
