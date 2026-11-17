@@ -157,6 +157,13 @@ fn platform_backend() -> Box<dyn KeyCustody> {
     }
 }
 
+/// The global options every call carries, consumed by run before
+/// the command's own options are read. Their names are never a
+/// value for one of the command's options, audit finding DK-A39:
+/// the swallow check of DK-A10 consults the command's own lists,
+/// and these two names stand in every call beside them.
+const GLOBAL_OPTIONS: [&str; 2] = ["--state", "--route"];
+
 /// A minimal option reader over the arguments of one command.
 struct Options {
     pairs: Vec<(String, String)>,
@@ -178,10 +185,15 @@ impl Options {
                 })?;
                 // A token naming an option this command itself
                 // offers is not a value, so the option stands with
-                // no value after it, audit finding DK-A10. A value
-                // that merely begins with hyphens and names no
-                // offered option still parses as a value.
-                if valued.contains(&value.as_str()) || flags.contains(&value.as_str()) {
+                // no value after it, audit finding DK-A10, and the
+                // same holds for the global options every call
+                // carries, audit finding DK-A39. A value that
+                // merely begins with hyphens and names no offered
+                // option still parses as a value.
+                if valued.contains(&value.as_str())
+                    || flags.contains(&value.as_str())
+                    || GLOBAL_OPTIONS.contains(&value.as_str())
+                {
                     return Err(caller(
                         "an option that takes a value stands with no value after it",
                     ));
