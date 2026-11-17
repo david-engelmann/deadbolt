@@ -998,9 +998,11 @@ impl<'a> Session<'a> {
 }
 
 fn hex(bytes: &[u8]) -> String {
+    const NIBBLES: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
-        out.push_str(&format!("{byte:02x}"));
+        out.push(NIBBLES[(byte >> 4) as usize] as char);
+        out.push(NIBBLES[(byte & 0x0f) as usize] as char);
     }
     out
 }
