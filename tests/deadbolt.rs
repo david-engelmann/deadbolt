@@ -437,6 +437,46 @@ fn redeem_refusal_reasons_are_distinct() {
 }
 
 #[test]
+fn redeem_of_an_ended_grant_after_its_expiry_answers_revoked() {
+    // DK-7 names the revoked reason at every instant, including
+    // instants after the grant expiry, and names expired only for
+    // a grant that stands unended. This pin stages the after
+    // expiry half of that sentence, which the rest of the suite
+    // leaves unstaged: every other ended grant here is redeemed
+    // inside its window, and the expired pins stage grants that
+    // were never ended. A redeem path that checked expiry before
+    // ended-ness would answer Expired for both halves below.
+    let dir = test_dir("revoked-after-expiry");
+    let h = Harness::new();
+    let state = dir.join("state.json");
+    enroll_a(&h, &state);
+    let receipt =
+        deadbolt::grant(&state, &h.open(), "cache-key", &read_scope(), 60, None, T0).unwrap();
+    deadbolt::revoke(&state, &h.open(), &receipt.grant_id, T0 + 10).unwrap();
+    for at in [T0 + 60, T0 + 600] {
+        let err =
+            deadbolt::redeem(&state, &h.open(), &receipt.token, &read_scope(), at).unwrap_err();
+        assert!(
+            matches!(err, Error::Redeem(RedeemRefusal::Revoked)),
+            "{err}"
+        );
+    }
+    let second =
+        deadbolt::grant(&state, &h.open(), "cache-key", &read_scope(), 60, None, T0).unwrap();
+    deadbolt::retire(&state, &h.open(), "cache-key", T0 + 20).unwrap();
+    let err =
+        deadbolt::redeem(&state, &h.open(), &second.token, &read_scope(), T0 + 120).unwrap_err();
+    assert!(
+        matches!(err, Error::Redeem(RedeemRefusal::Revoked)),
+        "{err}"
+    );
+    let entries = deadbolt::audit(&state, &h.open(), T0).unwrap();
+    let last = entries.last().unwrap();
+    assert_eq!(last.kind, "redeem");
+    assert_eq!(last.outcome, "refused, revoked");
+}
+
+#[test]
 fn revoke_is_permanent_and_double_revoke_is_refused() {
     let dir = test_dir("revoke");
     let h = Harness::new();
