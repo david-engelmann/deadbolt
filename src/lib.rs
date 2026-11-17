@@ -958,8 +958,16 @@ impl<'a> Session<'a> {
             let _ = std::fs::remove_file(&temp_path);
             return Err(err);
         }
-        std::fs::rename(&temp_path, &self.state_path)
-            .map_err(|err| io_refusal(&self.state_path, err))?;
+        if let Err(err) = std::fs::rename(&temp_path, &self.state_path) {
+            // A failed rename leaves the sealed temporary copy
+            // standing beside the store, audit finding DK-A4.
+            // The write-error path above already removes it, and
+            // this path owes the same cleanup before the error
+            // returns, so a failed publish leaves the directory
+            // exactly as it stood.
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(io_refusal(&self.state_path, err));
+        }
         if let Ok(dir_file) = File::open(&directory) {
             let _ = dir_file.sync_all();
         }
