@@ -50,7 +50,10 @@ fn test_dir(tag: &str) -> PathBuf {
 }
 
 fn read_scope() -> Scope {
-    Scope::new("vault", "read").unwrap()
+    Scope {
+        resource: "vault".to_string(),
+        action: "read".to_string(),
+    }
 }
 
 struct Supply;
