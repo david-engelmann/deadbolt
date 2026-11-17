@@ -551,6 +551,26 @@ fn check_scope(scope: &Scope) -> Result<(), Error> {
     Ok(())
 }
 
+/// The scope list shape every scope taking act shares, DK-3 as
+/// DK-25 and DK-27 cite it: at least one scope, each one checked,
+/// and no scope repeated. The act phrase names the act in the two
+/// refusal wordings, which stand as each act has always spoken
+/// them, and the checks run in the order the acts have always run
+/// them, the nonempty refusal first and the repeat count inside
+/// the per scope loop. Audit finding DK-A15.
+fn check_scopes(act: &str, scopes: &[Scope]) -> Result<(), Error> {
+    if scopes.is_empty() {
+        return Err(Error::Caller(format!("{act} must name at least one scope")));
+    }
+    for scope in scopes {
+        check_scope(scope)?;
+        if scopes.iter().filter(|other| *other == scope).count() > 1 {
+            return Err(Error::Caller(format!("{act} must not repeat a scope")));
+        }
+    }
+    Ok(())
+}
+
 fn check_instant(now: i64) -> Result<(), Error> {
     if !(INSTANT_MIN..=INSTANT_MAX).contains(&now) {
         return Err(Error::Caller(
@@ -1037,19 +1057,7 @@ pub fn enroll(
 ) -> Result<(), Error> {
     check_name("credential name", name)?;
     check_value(value)?;
-    if scopes.is_empty() {
-        return Err(Error::Caller(
-            "an enrollment must name at least one scope".to_string(),
-        ));
-    }
-    for scope in scopes {
-        check_scope(scope)?;
-        if scopes.iter().filter(|other| *other == scope).count() > 1 {
-            return Err(Error::Caller(
-                "an enrollment must not repeat a scope".to_string(),
-            ));
-        }
-    }
+    check_scopes("an enrollment", scopes)?;
     check_instant(now)?;
     let mut session = Session::open(state_path, unlock, now)?;
     if session
@@ -1154,19 +1162,7 @@ pub fn rotate(
     check_name("credential name", predecessor)?;
     check_name("credential name", successor)?;
     check_value(value)?;
-    if scopes.is_empty() {
-        return Err(Error::Caller(
-            "a rotation must name at least one scope".to_string(),
-        ));
-    }
-    for scope in scopes {
-        check_scope(scope)?;
-        if scopes.iter().filter(|other| *other == scope).count() > 1 {
-            return Err(Error::Caller(
-                "a rotation must not repeat a scope".to_string(),
-            ));
-        }
-    }
+    check_scopes("a rotation", scopes)?;
     check_instant(now)?;
     let mut session = Session::open(state_path, unlock, now)?;
     if !session
@@ -1265,19 +1261,7 @@ pub fn replace(
 ) -> Result<(usize, u64), Error> {
     check_name("credential name", name)?;
     check_value(value)?;
-    if scopes.is_empty() {
-        return Err(Error::Caller(
-            "a replacement must name at least one scope".to_string(),
-        ));
-    }
-    for scope in scopes {
-        check_scope(scope)?;
-        if scopes.iter().filter(|other| *other == scope).count() > 1 {
-            return Err(Error::Caller(
-                "a replacement must not repeat a scope".to_string(),
-            ));
-        }
-    }
+    check_scopes("a replacement", scopes)?;
     check_instant(now)?;
     let mut session = Session::open(state_path, unlock, now)?;
     let position = session
