@@ -619,6 +619,10 @@ fn unlock_key(sealed: &Sealed, unlock: &Unlock) -> Result<StoreKey, Error> {
             CustodyLoad::ServiceFailure(_) => Err(Error::Refusal(
                 "the store is locked because the keychain service is not available".to_string(),
             )),
+            CustodyLoad::MalformedEntry(_) => Err(Error::Refusal(
+                "the store is locked because its keychain entry does not hold a store key"
+                    .to_string(),
+            )),
         },
         Route::Passphrase => {
             let passphrase = take_passphrase(unlock)?;
