@@ -328,15 +328,14 @@ fn parse_state(text: &str) -> Result<State, Error> {
             "the state file names a format this broker does not read".to_string(),
         ));
     }
-    let mut names: Vec<&str> = Vec::new();
+    let mut names: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for credential in &state.credentials {
-        if names.contains(&credential.name.as_str()) {
+        if !names.insert(credential.name.as_str()) {
             return Err(Error::Corrupt(format!(
                 "the state file carries the credential name {} more than once",
                 credential.name
             )));
         }
-        names.push(credential.name.as_str());
         if credential.incarnation == 0 {
             return Err(Error::Corrupt(format!(
                 "the credential {} carries an incarnation of 0 in the state file",
@@ -350,14 +349,9 @@ fn parse_state(text: &str) -> Result<State, Error> {
                 credential.name
             )));
         }
+        let mut scopes: std::collections::HashSet<(&str, &str)> = std::collections::HashSet::new();
         for scope in &credential.scopes {
-            if credential
-                .scopes
-                .iter()
-                .filter(|other| *other == scope)
-                .count()
-                > 1
-            {
+            if !scopes.insert((scope.resource.as_str(), scope.action.as_str())) {
                 return Err(Error::Corrupt(format!(
                     "the credential {} carries one scope twice in the state file",
                     credential.name
@@ -365,8 +359,8 @@ fn parse_state(text: &str) -> Result<State, Error> {
             }
         }
     }
-    let mut ids: Vec<&str> = Vec::new();
-    let mut hashes: Vec<&str> = Vec::new();
+    let mut ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut hashes: std::collections::HashSet<&str> = std::collections::HashSet::new();
     // Live in DK-2 carries the meaning DK-7 gives it, judged against
     // the latest instant the document itself records in its audit
     // trail. A grant already dead by expiry at that instant is not
@@ -379,18 +373,16 @@ fn parse_state(text: &str) -> Result<State, Error> {
         .max()
         .unwrap_or(INSTANT_MIN);
     for grant in &state.grants {
-        if ids.contains(&grant.id.as_str()) {
+        if !ids.insert(grant.id.as_str()) {
             return Err(Error::Corrupt(
                 "the state file carries one grant id more than once".to_string(),
             ));
         }
-        ids.push(grant.id.as_str());
-        if hashes.contains(&grant.token_hash.as_str()) {
+        if !hashes.insert(grant.token_hash.as_str()) {
             return Err(Error::Corrupt(
                 "the state file carries one token hash more than once".to_string(),
             ));
         }
-        hashes.push(grant.token_hash.as_str());
         if grant.incarnation == 0 {
             return Err(Error::Corrupt(
                 "a grant in the state file carries an incarnation of 0".to_string(),
