@@ -399,3 +399,75 @@ fn codepoint_scan_skips_a_file_with_an_uppercase_binary_suffix() {
     assert!(result.stdout.contains("em dash U+2014 count 0"));
     assert!(result.stdout.contains("en dash U+2013 count 0"));
 }
+
+// Audit finding DK-A3: the scanner collects regular files only.
+// Before the fix a FIFO was collected as a file and its read
+// blocked forever, so the FIFO pin drives the scanner under a
+// deadline: against the old code the deadline expires and the
+// pin fails on the missing answer, where against the fix the
+// scan answers at once.
+
+fn scan_tree_with_deadline(root: &Path) -> Option<ScanOutput> {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_codepoint_scan"))
+        .arg(root)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match child.try_wait().unwrap() {
+            Some(_) => {
+                let output = child.wait_with_output().unwrap();
+                return Some(ScanOutput {
+                    status: output.status.code().unwrap_or(-1),
+                    stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+                    stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                });
+            }
+            None => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+        }
+    }
+}
+
+#[test]
+fn codepoint_scan_skips_a_fifo_and_terminates() {
+    let dir = temp_dir("fifo");
+    std::fs::write(dir.join("clean.md"), "clean").unwrap();
+    let made = Command::new("mkfifo")
+        .arg(dir.join("pipe"))
+        .output()
+        .unwrap();
+    assert!(made.status.success());
+    let result = scan_tree_with_deadline(&dir).expect("the scan terminated");
+    assert_eq!(result.status, 0, "{}", result.stderr);
+    assert!(result.stdout.contains("em dash U+2014 count 0"));
+    assert!(result.stdout.contains("en dash U+2013 count 0"));
+}
+
+#[test]
+fn codepoint_scan_counts_a_dash_through_a_symlink_to_a_file() {
+    let dir = temp_dir("symlink-file");
+    std::fs::write(dir.join("real.md"), "a\u{2014}b").unwrap();
+    std::os::unix::fs::symlink(dir.join("real.md"), dir.join("link.md")).unwrap();
+    let result = scan_tree(&dir);
+    assert_eq!(result.status, 1);
+    assert!(result.stdout.contains("em dash U+2014 count 2"));
+}
+
+#[test]
+fn codepoint_scan_skips_a_dangling_symlink() {
+    let dir = temp_dir("symlink-dangling");
+    std::fs::write(dir.join("clean.md"), "clean").unwrap();
+    std::os::unix::fs::symlink(dir.join("missing.md"), dir.join("link.md")).unwrap();
+    let result = scan_tree(&dir);
+    assert_eq!(result.status, 0, "{}", result.stderr);
+    assert!(result.stdout.contains("em dash U+2014 count 0"));
+}
