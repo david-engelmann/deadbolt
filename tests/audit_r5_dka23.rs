@@ -12,7 +12,12 @@
 //! stream is /dev/full, the device whose writes always fail with
 //! no space, driven here exactly as an operator's full disk or
 //! closed pipe presents it. Custody runs on the passphrase route,
-//! and no test here touches a real keychain.
+//! and no test here touches a real keychain. The pins stand on
+//! /dev/full, a Linux device, so the file stands gated to Linux;
+//! the behavior they pin is the binaries' own and stands on
+//! every platform, and the fixture is the platform bound part.
+
+#![cfg(target_os = "linux")]
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
