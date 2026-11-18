@@ -11,9 +11,10 @@
 //! directory the gitignore names, and the scanner must be able to
 //! run over a tree the local gate has already built in. The scan
 //! root defaults to the current directory, where the setup scanner
-//! defaulted to the root of the repo it shipped in, and the gate
-//! names the root explicitly either way. A scan root that does not
-//! stand is a scan error at exit 2, where the setup scanner exited
+//! defaulted to the root of the repo it shipped in. The gate runs
+//! the scan from the root it means to scan and names no root, so
+//! the default names that root. A scan root that does not stand
+//! is a scan error at exit 2, where the setup scanner exited
 //! 0 with zero counts. A file that cannot be read is a clean scan
 //! error at exit 2, where the setup scanner let the failure escape
 //! as a traceback at exit 1. The walk excludes directories by name
