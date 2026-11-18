@@ -36,8 +36,8 @@ pub const INSTANT_MAX: i64 = 253_402_300_799;
 pub const NAME_MAX: usize = 64;
 
 /// A typed broker error. The command line maps the variants to exit
-/// codes, caller errors to 2 and every refusal, corruption, and
-/// permission failure to 1.
+/// codes, caller errors and Io errors to 2, and every refusal,
+/// corruption, and permission failure to 1.
 #[derive(Debug)]
 pub enum Error {
     /// The request itself is malformed, bad names, bad shapes, an
