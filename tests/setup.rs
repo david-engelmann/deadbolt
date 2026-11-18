@@ -514,3 +514,27 @@ fn codepoint_scan_refuses_an_extra_argument_before_scanning() {
     assert_eq!(result.status, 2, "{}", result.stdout);
     assert!(result.stdout.is_empty(), "{}", result.stdout);
 }
+
+// Audit finding DK-A44: the scanner answers a scan error at exit 2
+// when the scan root does not stand, a deliberate difference from
+// the setup scanner the module record names, which exited 0 with
+// zero counts. This pin is a preservation pin: it passes against
+// the standing code by design and fails on the plausible wrong
+// form, a scanner that reads a missing root as an empty tree and
+// answers the zero counts at exit 0.
+
+#[test]
+fn codepoint_scan_refuses_a_root_that_does_not_stand() {
+    let dir = temp_dir("missing-root");
+    let missing = dir.join("no-such-tree");
+    let result = scan_tree(&missing);
+    assert_eq!(result.status, 2, "{}", result.stdout);
+    assert!(result.stderr.contains("cannot read"), "{}", result.stderr);
+    assert!(
+        result.stderr.contains(&missing.display().to_string()),
+        "{}",
+        result.stderr
+    );
+    assert_eq!(result.stderr.lines().count(), 1, "{}", result.stderr);
+    assert!(result.stdout.is_empty(), "{}", result.stdout);
+}
