@@ -69,7 +69,18 @@ impl std::fmt::Display for Error {
     }
 }
 
-impl std::error::Error for Error {}
+// The error chain, audit finding DK-A35. The Io variant carries
+// the filesystem error that explains it, and source hands that
+// error to a caller walking the chain. Every other variant
+// carries its whole account in its own text and answers none.
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Error::Io(err) => Some(err),
+            _ => None,
+        }
+    }
+}
 
 impl From<std::io::Error> for Error {
     fn from(err: std::io::Error) -> Self {
