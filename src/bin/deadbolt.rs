@@ -12,7 +12,7 @@
 //! and corrupt and permission gated states 1, and caller errors 2,
 //! with every error as one line on standard error.
 
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Mutex;
@@ -26,14 +26,36 @@ use deadbolt::{Error, PassphraseSource, Route, Scope, Unlock, Zeroizing};
 fn main() -> ExitCode {
     match collect_args().and_then(|args| run(&args)) {
         Ok(output) => {
-            print!("{output}");
-            ExitCode::from(0)
+            let stdout = std::io::stdout();
+            let mut lock = stdout.lock();
+            let written = lock.write_all(output.as_bytes()).and_then(|_| lock.flush());
+            match written {
+                Ok(()) => ExitCode::from(0),
+                Err(err) => {
+                    error_line(&format!("the output could not be written because {err}"));
+                    ExitCode::from(2)
+                }
+            }
         }
         Err(err) => {
-            eprintln!("error: {err}");
+            error_line(&format!("{err}"));
             ExitCode::from(exit_code(&err))
         }
     }
+}
+
+/// Write the one error line of DK-13 to standard error through a
+/// fallible write that never panics, audit finding DK-A23. The
+/// print macros panic when a write fails, and a failed write on
+/// the error line itself would replace the exit code its error
+/// carries with the panic's 101, outside the DK-13 taxonomy. A
+/// failure here has no channel left to report through and is let
+/// go, so the exit code always stands.
+fn error_line(message: &str) {
+    let stderr = std::io::stderr();
+    let mut lock = stderr.lock();
+    let _ = lock.write_all(format!("error: {message}\n").as_bytes());
+    let _ = lock.flush();
 }
 
 /// The call's arguments, read through the operating system form
