@@ -1,8 +1,9 @@
 //! Pins for the custody seam of DK-18 and DK-19, driven through the
 //! fixture backend and the passphrase backend.
 //!
-//! The platform backend is constructed and driven once, in the last
-//! test, against the machine the suite runs on. That machine runs no
+//! The platform backend is constructed and driven once, in
+//! platform_custody_without_a_service_answers_service_failure,
+//! against the machine the suite runs on. That machine runs no
 //! keychain service, so the drive lands in the failure outcome, which
 //! is the outcome DK-24 names as the residue this suite cannot retire.
 
