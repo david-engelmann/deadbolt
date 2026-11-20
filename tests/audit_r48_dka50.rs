@@ -31,7 +31,7 @@
 //! shaped strings carry the SYNTHETIC-TEST-VALUE marker so no
 //! fixture can be mistaken for a real key.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use deadbolt::custody::FixtureCustody;
@@ -105,7 +105,7 @@ impl Ctx {
     }
 }
 
-fn enroll_a(ctx: &Ctx, state: &PathBuf) {
+fn enroll_a(ctx: &Ctx, state: &Path) {
     deadbolt::enroll(
         state,
         &ctx.creating(),
@@ -117,7 +117,7 @@ fn enroll_a(ctx: &Ctx, state: &PathBuf) {
     .unwrap();
 }
 
-fn audit_kinds(ctx: &Ctx, state: &PathBuf) -> Vec<String> {
+fn audit_kinds(ctx: &Ctx, state: &Path) -> Vec<String> {
     deadbolt::audit(state, &ctx.open(), T0)
         .unwrap()
         .iter()
