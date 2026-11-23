@@ -121,6 +121,13 @@ pub enum CustodyLoad {
     /// it, and every refusal on this outcome speaks in the fixed
     /// wording DK-22 names, so backend text reaches no output.
     ServiceFailure(String),
+    /// The service answered and an entry stands under this store
+    /// identifier, but the bytes it holds are not a store key.
+    /// The case is neither an absence nor a service failure, and
+    /// DK-22 as amended words it apart from both. The string is
+    /// the diagnostic the backend reported, held to the same
+    /// never printed discipline as the service failure string.
+    MalformedEntry(String),
 }
 
 /// A custody operation that failed outside the load outcome taxonomy.
@@ -333,7 +340,7 @@ mod platform {
                     let held = bytes.len();
                     match store_key_from_secret(&mut bytes) {
                         Some(key) => CustodyLoad::Key(key),
-                        None => CustodyLoad::ServiceFailure(format!(
+                        None => CustodyLoad::MalformedEntry(format!(
                             "the keychain entry for this store holds {held} bytes and a store key is {KEY_LEN} bytes"
                         )),
                     }
@@ -374,9 +381,8 @@ mod fixture {
 
     /// The tests-only custody backend, holding keys in memory.
     ///
-    /// The fixture answers each of the three load outcomes the seam
-    /// defines, a stored key, an absent key, and a service failure the
-    /// test arms and clears. It is compiled only under the
+    /// The fixture answers a stored key, an absent key, and a service
+    /// failure the test arms and clears. It is compiled only under the
     /// custody-fixture feature, a public feature that exists for this
     /// crate's own tests, and a consumer who enables that feature
     /// links it. No production code path in this crate constructs it.

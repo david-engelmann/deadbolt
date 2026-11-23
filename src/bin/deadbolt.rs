@@ -12,7 +12,7 @@
 //! and corrupt and permission gated states 1, and caller errors 2,
 //! with every error as one line on standard error.
 
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Mutex;
@@ -26,14 +26,36 @@ use deadbolt::{Error, PassphraseSource, Route, Scope, Unlock, Zeroizing};
 fn main() -> ExitCode {
     match collect_args().and_then(|args| run(&args)) {
         Ok(output) => {
-            print!("{output}");
-            ExitCode::from(0)
+            let stdout = std::io::stdout();
+            let mut lock = stdout.lock();
+            let written = lock.write_all(output.as_bytes()).and_then(|_| lock.flush());
+            match written {
+                Ok(()) => ExitCode::from(0),
+                Err(err) => {
+                    error_line(&format!("the output could not be written because {err}"));
+                    ExitCode::from(2)
+                }
+            }
         }
         Err(err) => {
-            eprintln!("error: {err}");
+            error_line(&format!("{err}"));
             ExitCode::from(exit_code(&err))
         }
     }
+}
+
+/// Write the one error line of DK-13 to standard error through a
+/// fallible write that never panics, audit finding DK-A23. The
+/// print macros panic when a write fails, and a failed write on
+/// the error line itself would replace the exit code its error
+/// carries with the panic's 101, outside the DK-13 taxonomy. A
+/// failure here has no channel left to report through and is let
+/// go, so the exit code always stands.
+fn error_line(message: &str) {
+    let stderr = std::io::stderr();
+    let mut lock = stderr.lock();
+    let _ = lock.write_all(format!("error: {message}\n").as_bytes());
+    let _ = lock.flush();
 }
 
 /// The call's arguments, read through the operating system form
@@ -157,6 +179,13 @@ fn platform_backend() -> Box<dyn KeyCustody> {
     }
 }
 
+/// The global options every call carries, consumed by run before
+/// the command's own options are read. Their names are never a
+/// value for one of the command's options, audit finding DK-A39:
+/// the swallow check of DK-A10 consults the command's own lists,
+/// and these two names stand in every call beside them.
+const GLOBAL_OPTIONS: [&str; 2] = ["--state", "--route"];
+
 /// A minimal option reader over the arguments of one command.
 struct Options {
     pairs: Vec<(String, String)>,
@@ -176,6 +205,21 @@ impl Options {
                 let value = args.get(index + 1).ok_or_else(|| {
                     caller("an option that takes a value stands with no value after it")
                 })?;
+                // A token naming an option this command itself
+                // offers is not a value, so the option stands with
+                // no value after it, audit finding DK-A10, and the
+                // same holds for the global options every call
+                // carries, audit finding DK-A39. A value that
+                // merely begins with hyphens and names no offered
+                // option still parses as a value.
+                if valued.contains(&value.as_str())
+                    || flags.contains(&value.as_str())
+                    || GLOBAL_OPTIONS.contains(&value.as_str())
+                {
+                    return Err(caller(
+                        "an option that takes a value stands with no value after it",
+                    ));
+                }
                 options.pairs.push((arg.clone(), value.clone()));
                 index += 2;
             } else if flags.contains(&arg.as_str()) {
@@ -235,6 +279,24 @@ fn parse_scope(text: &str) -> Result<Scope, Error> {
     })
 }
 
+/// The scopes one command names, collected and parsed.
+///
+/// Enroll, rotate, and replace share this collection: the scope
+/// options as they stand, at least one of them, each parsed
+/// through parse_scope. The refusal for an empty list names the
+/// act, as each arm has always spoken it. Audit finding DK-A18.
+fn scopes_option(options: &Options, act: &str) -> Result<Vec<Scope>, Error> {
+    let scope_texts = options.many("--scope");
+    if scope_texts.is_empty() {
+        return Err(caller(&format!("{act} names at least one scope")));
+    }
+    let mut scopes = Vec::new();
+    for text in &scope_texts {
+        scopes.push(parse_scope(text)?);
+    }
+    Ok(scopes)
+}
+
 fn read_value_file(path: &str) -> Result<String, Error> {
     let text = std::fs::read_to_string(path)
         .map_err(|_| caller("the value file cannot be read as text"))?;
@@ -282,14 +344,7 @@ fn run(args: &[String]) -> Result<String, Error> {
             let options = Options::parse(rest, &["--name", "--value-file", "--scope"], &[])?;
             let name = options.required("--name")?;
             let value_file = options.required("--value-file")?;
-            let scope_texts = options.many("--scope");
-            if scope_texts.is_empty() {
-                return Err(caller("enroll names at least one scope"));
-            }
-            let mut scopes = Vec::new();
-            for text in &scope_texts {
-                scopes.push(parse_scope(text)?);
-            }
+            let scopes = scopes_option(&options, "enroll")?;
             let value = read_value_file(&value_file)?;
             deadbolt::enroll(&state, &unlock, &name, &value, &scopes, now)?;
             Ok(format!("{}\n", serde_json::json!({"enrolled": name})))
@@ -309,14 +364,7 @@ fn run(args: &[String]) -> Result<String, Error> {
             let name = options.required("--name")?;
             let new_name = options.required("--new-name")?;
             let value_file = options.required("--value-file")?;
-            let scope_texts = options.many("--scope");
-            if scope_texts.is_empty() {
-                return Err(caller("rotate names at least one scope"));
-            }
-            let mut scopes = Vec::new();
-            for text in &scope_texts {
-                scopes.push(parse_scope(text)?);
-            }
+            let scopes = scopes_option(&options, "rotate")?;
             let value = read_value_file(&value_file)?;
             let ended = deadbolt::rotate(&state, &unlock, &name, &new_name, &value, &scopes, now)?;
             Ok(format!(
@@ -328,14 +376,7 @@ fn run(args: &[String]) -> Result<String, Error> {
             let options = Options::parse(rest, &["--name", "--value-file", "--scope"], &[])?;
             let name = options.required("--name")?;
             let value_file = options.required("--value-file")?;
-            let scope_texts = options.many("--scope");
-            if scope_texts.is_empty() {
-                return Err(caller("replace names at least one scope"));
-            }
-            let mut scopes = Vec::new();
-            for text in &scope_texts {
-                scopes.push(parse_scope(text)?);
-            }
+            let scopes = scopes_option(&options, "replace")?;
             let value = read_value_file(&value_file)?;
             let (ended, incarnation) =
                 deadbolt::replace(&state, &unlock, &name, &value, &scopes, now)?;
@@ -350,9 +391,24 @@ fn run(args: &[String]) -> Result<String, Error> {
             let credential = options.required("--credential")?;
             let scope = parse_scope(&options.required("--scope")?)?;
             let ttl_text = options.required("--ttl")?;
-            let ttl: u64 = ttl_text
-                .parse()
-                .map_err(|_| caller("the time to live is not a whole number of seconds"))?;
+            let ttl: u64 = ttl_text.parse().map_err(|_| {
+                // A text of digits alone that fails the parse has
+                // overflowed the type. It is a whole number standing
+                // outside the accepted range, so it draws the range
+                // wording the library speaks for that condition,
+                // audit finding DK-A25.
+                let overflowed = !ttl_text.is_empty()
+                    && ttl_text.bytes().all(|byte| byte.is_ascii_digit());
+                if overflowed {
+                    Error::Caller(format!(
+                        "the time to live must stand from {} to {} seconds",
+                        deadbolt::TTL_MIN,
+                        deadbolt::TTL_MAX
+                    ))
+                } else {
+                    caller("the time to live is not a whole number of seconds")
+                }
+            })?;
             let run = options.one("--run")?;
             let receipt = deadbolt::grant(
                 &state,
