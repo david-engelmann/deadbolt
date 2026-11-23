@@ -69,7 +69,18 @@ impl std::fmt::Display for Error {
     }
 }
 
-impl std::error::Error for Error {}
+// The error chain, audit finding DK-A35. The Io variant carries
+// the filesystem error that explains it, and source hands that
+// error to a caller walking the chain. Every other variant
+// carries its whole account in its own text and answers none.
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Error::Io(err) => Some(err),
+            _ => None,
+        }
+    }
+}
 
 impl From<std::io::Error> for Error {
     fn from(err: std::io::Error) -> Self {
@@ -199,7 +210,7 @@ impl std::fmt::Debug for GrantReceipt {
 
 /// One audit entry. Entries never carry a value, a token, or a token
 /// hash, so the whole record is safe to print.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuditEntry {
     pub seq: u64,
@@ -228,7 +239,7 @@ fn incarnation_stands_at_one(incarnation: &u64) -> bool {
     *incarnation <= 1
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Credential {
     name: String,
@@ -242,7 +253,7 @@ struct Credential {
     incarnation: u64,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Grant {
     id: String,
@@ -262,7 +273,7 @@ struct Grant {
     incarnation: u64,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct State {
     format: String,
@@ -478,57 +489,12 @@ fn check_stored_instant(instant: i64) -> Result<(), Error> {
 /// against the document its rendered envelope decrypts to, and the
 /// comparison runs over the document fields rather than rendered
 /// bytes, because the proof vouches for the document and the
-/// envelope is only its carrier.
+/// envelope is only its carrier. The comparison is the derived
+/// equality of the document structures, audit finding DK-A17,
+/// so it covers every field the structures carry by
+/// construction and cannot drift from them.
 fn state_documents_equal(a: &State, b: &State) -> bool {
-    if a.format != b.format || a.store_id != b.store_id {
-        return false;
-    }
-    if a.credentials.len() != b.credentials.len()
-        || a.grants.len() != b.grants.len()
-        || a.audit.len() != b.audit.len()
-    {
-        return false;
-    }
-    for (mine, theirs) in a.credentials.iter().zip(b.credentials.iter()) {
-        if mine.name != theirs.name
-            || mine.value != theirs.value
-            || mine.scopes != theirs.scopes
-            || mine.enrolled_at != theirs.enrolled_at
-            || mine.incarnation != theirs.incarnation
-        {
-            return false;
-        }
-    }
-    for (mine, theirs) in a.grants.iter().zip(b.grants.iter()) {
-        if mine.id != theirs.id
-            || mine.credential != theirs.credential
-            || mine.resource != theirs.resource
-            || mine.action != theirs.action
-            || mine.run_id != theirs.run_id
-            || mine.token_hash != theirs.token_hash
-            || mine.granted_at != theirs.granted_at
-            || mine.expires_at != theirs.expires_at
-            || mine.ended_at != theirs.ended_at
-            || mine.end_reason != theirs.end_reason
-            || mine.incarnation != theirs.incarnation
-        {
-            return false;
-        }
-    }
-    for (mine, theirs) in a.audit.iter().zip(b.audit.iter()) {
-        if mine.seq != theirs.seq
-            || mine.at != theirs.at
-            || mine.kind != theirs.kind
-            || mine.credential != theirs.credential
-            || mine.resource != theirs.resource
-            || mine.action != theirs.action
-            || mine.run_id != theirs.run_id
-            || mine.outcome != theirs.outcome
-        {
-            return false;
-        }
-    }
-    true
+    a == b
 }
 
 /// Request shape validation. Failures here are caller errors, raised
@@ -555,6 +521,26 @@ fn check_name(what: &str, name: &str) -> Result<(), Error> {
 fn check_scope(scope: &Scope) -> Result<(), Error> {
     check_name("resource", &scope.resource)?;
     check_name("action", &scope.action)?;
+    Ok(())
+}
+
+/// The scope list shape every scope taking act shares, DK-3 as
+/// DK-25 and DK-27 cite it: at least one scope, each one checked,
+/// and no scope repeated. The act phrase names the act in the two
+/// refusal wordings, which stand as each act has always spoken
+/// them, and the checks run in the order the acts have always run
+/// them, the nonempty refusal first and the repeat count inside
+/// the per scope loop. Audit finding DK-A15.
+fn check_scopes(act: &str, scopes: &[Scope]) -> Result<(), Error> {
+    if scopes.is_empty() {
+        return Err(Error::Caller(format!("{act} must name at least one scope")));
+    }
+    for scope in scopes {
+        check_scope(scope)?;
+        if scopes.iter().filter(|other| *other == scope).count() > 1 {
+            return Err(Error::Caller(format!("{act} must not repeat a scope")));
+        }
+    }
     Ok(())
 }
 
@@ -1051,6 +1037,24 @@ fn random_hex(bytes: usize) -> Result<String, Error> {
     Ok(hex(&buffer))
 }
 
+/// End every grant of one credential that stands live at the
+/// instant, unended and strictly before its expiry, stamping the
+/// instant and the reason retired, and return how many grants
+/// ended, DK-4 and DK-7. Retire, rotate, and replace share this
+/// one shape. Cutoff ends grants by run under its own reason and
+/// stands apart. Audit finding DK-A16.
+fn end_live_grants(grants: &mut [Grant], name: &str, now: i64) -> usize {
+    let mut ended = 0;
+    for grant in grants.iter_mut() {
+        if grant.credential == name && grant.ended_at.is_none() && now < grant.expires_at {
+            grant.ended_at = Some(now);
+            grant.end_reason = Some("retired".to_string());
+            ended += 1;
+        }
+    }
+    ended
+}
+
 /// Enroll a credential with its value and allowed scopes, DK-3.
 pub fn enroll(
     state_path: &Path,
@@ -1062,19 +1066,7 @@ pub fn enroll(
 ) -> Result<(), Error> {
     check_name("credential name", name)?;
     check_value(value)?;
-    if scopes.is_empty() {
-        return Err(Error::Caller(
-            "an enrollment must name at least one scope".to_string(),
-        ));
-    }
-    for scope in scopes {
-        check_scope(scope)?;
-        if scopes.iter().filter(|other| *other == scope).count() > 1 {
-            return Err(Error::Caller(
-                "an enrollment must not repeat a scope".to_string(),
-            ));
-        }
-    }
+    check_scopes("an enrollment", scopes)?;
     check_instant(now)?;
     let mut session = Session::open(state_path, unlock, now)?;
     if session
@@ -1138,14 +1130,7 @@ pub fn retire(state_path: &Path, unlock: &Unlock, name: &str, now: i64) -> Resul
             "retire refused, no credential named {name} stands"
         )));
     }
-    let mut ended = 0;
-    for grant in session.state.grants.iter_mut() {
-        if grant.credential == name && grant.ended_at.is_none() && now < grant.expires_at {
-            grant.ended_at = Some(now);
-            grant.end_reason = Some("retired".to_string());
-            ended += 1;
-        }
-    }
+    let ended = end_live_grants(&mut session.state.grants, name, now);
     session
         .state
         .credentials
@@ -1179,19 +1164,7 @@ pub fn rotate(
     check_name("credential name", predecessor)?;
     check_name("credential name", successor)?;
     check_value(value)?;
-    if scopes.is_empty() {
-        return Err(Error::Caller(
-            "a rotation must name at least one scope".to_string(),
-        ));
-    }
-    for scope in scopes {
-        check_scope(scope)?;
-        if scopes.iter().filter(|other| *other == scope).count() > 1 {
-            return Err(Error::Caller(
-                "a rotation must not repeat a scope".to_string(),
-            ));
-        }
-    }
+    check_scopes("a rotation", scopes)?;
     check_instant(now)?;
     let mut session = Session::open(state_path, unlock, now)?;
     if !session
@@ -1230,14 +1203,7 @@ pub fn rotate(
             "rotate refused, a credential named {successor} already stands"
         )));
     }
-    let mut ended = 0;
-    for grant in session.state.grants.iter_mut() {
-        if grant.credential == predecessor && grant.ended_at.is_none() && now < grant.expires_at {
-            grant.ended_at = Some(now);
-            grant.end_reason = Some("retired".to_string());
-            ended += 1;
-        }
-    }
+    let ended = end_live_grants(&mut session.state.grants, predecessor, now);
     session.state.credentials.push(Credential {
         name: successor.to_string(),
         value: value.to_string(),
@@ -1290,19 +1256,7 @@ pub fn replace(
 ) -> Result<(usize, u64), Error> {
     check_name("credential name", name)?;
     check_value(value)?;
-    if scopes.is_empty() {
-        return Err(Error::Caller(
-            "a replacement must name at least one scope".to_string(),
-        ));
-    }
-    for scope in scopes {
-        check_scope(scope)?;
-        if scopes.iter().filter(|other| *other == scope).count() > 1 {
-            return Err(Error::Caller(
-                "a replacement must not repeat a scope".to_string(),
-            ));
-        }
-    }
+    check_scopes("a replacement", scopes)?;
     check_instant(now)?;
     let mut session = Session::open(state_path, unlock, now)?;
     let position = session
@@ -1343,14 +1297,7 @@ pub fn replace(
             )));
         }
     };
-    let mut ended = 0;
-    for grant in session.state.grants.iter_mut() {
-        if grant.credential == name && grant.ended_at.is_none() && now < grant.expires_at {
-            grant.ended_at = Some(now);
-            grant.end_reason = Some("retired".to_string());
-            ended += 1;
-        }
-    }
+    let ended = end_live_grants(&mut session.state.grants, name, now);
     let credential = &mut session.state.credentials[position];
     credential.value = value.to_string();
     credential.scopes = scopes.to_vec();

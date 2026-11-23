@@ -1,9 +1,9 @@
 //! Audit Round 3 pin for finding DK-A8: the Debug rendering of a
-//! grant receipt never prints the bearer token it carries, in the
-//! same discipline the suite pins for the store key in
+//! grant receipt never prints the token it carries, in the same
+//! discipline the suite pins for the store key in
 //! tests/custody.rs. The rendering still shows the receipt's
 //! shape, its grant id and its expiry instant, with the token
-//! standing as redacted.
+//! standing as the word redacted.
 //!
 //! Every fixture is synthetic and names itself as one. Custody
 //! runs against the fixture backend, and no test here touches a

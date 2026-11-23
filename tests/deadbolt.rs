@@ -1,5 +1,5 @@
-//! Protocol tests for the broker core, pinning DK-1 to DK-14 over
-//! stores the envelope of DK-15 to DK-24 seals.
+//! Protocol tests for the broker core, pinning DK-1 to DK-14 and
+//! DK-25 to DK-27 over stores the envelope of DK-15 to DK-24 seals.
 //! Every fixture is synthetic and names itself as one. Credential
 //! shaped strings carry the SYNTHETIC-TEST-VALUE marker so no fixture
 //! can be mistaken for a real key.
@@ -15,8 +15,13 @@
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
+// The shared test harness home of audit finding DK-A19. Items a
+// suite does not use stand allowed dead in its crate.
+#[allow(dead_code)]
+mod common;
+
+use common::{decrypt_document, hex_bytes, read_scope, set_mode, state_text};
 use deadbolt::custody::{CustodyLoad, FixtureCustody, KeyCustody};
 use deadbolt::{Error, PassphraseSource, RedeemRefusal, Route, Scope, Unlock, Zeroizing};
 
@@ -28,14 +33,8 @@ const STORE_PASSPHRASE: &str = "SYNTHETIC-TEST-VALUE-store-passphrase";
 const CLI_PASSPHRASE: &str = "SYNTHETIC-TEST-VALUE-cli-passphrase";
 const T0: i64 = 1_700_000_000;
 
-static COUNTER: AtomicUsize = AtomicUsize::new(0);
-
 fn test_dir(tag: &str) -> PathBuf {
-    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-    let dir = std::env::temp_dir().join(format!("deadbolt-test-{}-{tag}-{n}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+    common::test_dir("deadbolt-test", tag)
 }
 
 fn scope(resource: &str, action: &str) -> Scope {
@@ -43,10 +42,6 @@ fn scope(resource: &str, action: &str) -> Scope {
         resource: resource.to_string(),
         action: action.to_string(),
     }
-}
-
-fn read_scope() -> Scope {
-    scope("bucket", "read")
 }
 
 /// A passphrase supply that always answers the store passphrase.
@@ -108,49 +103,6 @@ fn enroll_a(h: &Harness, state: &Path) {
     .unwrap();
 }
 
-fn state_text(state: &PathBuf) -> String {
-    std::fs::read_to_string(state).unwrap()
-}
-
-fn hex_bytes(text: &str) -> Vec<u8> {
-    let bytes = text.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len() / 2);
-    let mut index = 0;
-    while index < bytes.len() {
-        let high = (bytes[index] as char).to_digit(16).unwrap();
-        let low = (bytes[index + 1] as char).to_digit(16).unwrap();
-        out.push((high * 16 + low) as u8);
-        index += 2;
-    }
-    out
-}
-
-/// Decrypt the document inside an envelope under a known key.
-///
-/// The header bytes the tag authenticates are the header exactly as
-/// the envelope carries it, and the rendering of the parsed header
-/// stands identical to those bytes because the writer renders the
-/// header in the canonical sorted form.
-fn decrypt_document(raw: &str, key: &deadbolt::custody::StoreKey) -> String {
-    use chacha20poly1305::aead::{Aead, Payload};
-    use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce};
-    let envelope: serde_json::Value = serde_json::from_str(raw).unwrap();
-    let header = envelope["header"].to_string();
-    let nonce = hex_bytes(envelope["nonce"].as_str().unwrap());
-    let ciphertext = hex_bytes(envelope["ciphertext"].as_str().unwrap());
-    let cipher = XChaCha20Poly1305::new(chacha20poly1305::Key::from_slice(key.as_bytes()));
-    let plain = cipher
-        .decrypt(
-            XNonce::from_slice(&nonce),
-            Payload {
-                msg: &ciphertext,
-                aad: header.as_bytes(),
-            },
-        )
-        .unwrap();
-    String::from_utf8(plain).unwrap()
-}
-
 /// The decrypted document of a store the harness's fixture serves.
 fn document_text(h: &Harness, state: &PathBuf) -> String {
     let raw = state_text(state);
@@ -177,10 +129,6 @@ fn cli_document_json(state: &PathBuf) -> serde_json::Value {
     let salt: [u8; 16] = salt.try_into().unwrap();
     let key = deadbolt::custody::derive_key(CLI_PASSPHRASE.as_bytes(), &salt).unwrap();
     serde_json::from_str(&decrypt_document(&raw, &key)).unwrap()
-}
-
-fn set_mode(state: &PathBuf, mode: u32) {
-    std::fs::set_permissions(state, std::fs::Permissions::from_mode(mode)).unwrap();
 }
 
 fn mode_of(state: &PathBuf) -> u32 {
@@ -434,6 +382,46 @@ fn redeem_refusal_reasons_are_distinct() {
         matches!(err, Error::Redeem(RedeemRefusal::Revoked)),
         "{err}"
     );
+}
+
+#[test]
+fn redeem_of_an_ended_grant_after_its_expiry_answers_revoked() {
+    // DK-7 names the revoked reason at every instant, including
+    // instants after the grant expiry, and names expired only for
+    // a grant that stands unended. This pin stages the after
+    // expiry half of that sentence, which the rest of the suite
+    // leaves unstaged: every other ended grant here is redeemed
+    // inside its window, and the expired pins stage grants that
+    // were never ended. A redeem path that checked expiry before
+    // ended-ness would answer Expired for both halves below.
+    let dir = test_dir("revoked-after-expiry");
+    let h = Harness::new();
+    let state = dir.join("state.json");
+    enroll_a(&h, &state);
+    let receipt =
+        deadbolt::grant(&state, &h.open(), "cache-key", &read_scope(), 60, None, T0).unwrap();
+    deadbolt::revoke(&state, &h.open(), &receipt.grant_id, T0 + 10).unwrap();
+    for at in [T0 + 60, T0 + 600] {
+        let err =
+            deadbolt::redeem(&state, &h.open(), &receipt.token, &read_scope(), at).unwrap_err();
+        assert!(
+            matches!(err, Error::Redeem(RedeemRefusal::Revoked)),
+            "{err}"
+        );
+    }
+    let second =
+        deadbolt::grant(&state, &h.open(), "cache-key", &read_scope(), 60, None, T0).unwrap();
+    deadbolt::retire(&state, &h.open(), "cache-key", T0 + 20).unwrap();
+    let err =
+        deadbolt::redeem(&state, &h.open(), &second.token, &read_scope(), T0 + 120).unwrap_err();
+    assert!(
+        matches!(err, Error::Redeem(RedeemRefusal::Revoked)),
+        "{err}"
+    );
+    let entries = deadbolt::audit(&state, &h.open(), T0).unwrap();
+    let last = entries.last().unwrap();
+    assert_eq!(last.kind, "redeem");
+    assert_eq!(last.outcome, "refused, revoked");
 }
 
 #[test]
