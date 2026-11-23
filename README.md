@@ -213,6 +213,103 @@ deadbolt --state rotation.json audit
 {"seq":8,"at":1794272231,"kind":"redeem","credential":"cache-key-2026","resource":"bucket","action":"read","run_id":null,"outcome":"redeemed"}
 ```
 
+### Revoke, replace, and retire
+
+Revoke ends one grant by its id, replace stands a new value up under the same name, and retire removes a credential altogether. The run below stands on the passphrase route, and the shapes it prints are the shapes both routes print. It runs on its own store named lifecycle.json, apart from the usage.json sequence the earlier sections share.
+
+```
+export DEADBOLT_PASSPHRASE='SYNTHETIC-TEST-VALUE-passphrase'
+echo 'SYNTHETIC-TEST-VALUE-session-key-v1' > session-key-v1.txt
+echo 'SYNTHETIC-TEST-VALUE-session-key-v2' > session-key-v2.txt
+deadbolt --state lifecycle.json --route passphrase enroll --name session-key --value-file session-key-v1.txt --scope bucket:read
+```
+
+```
+{"enrolled":"session-key"}
+```
+
+A grant against the credential stands live until an act ends it.
+
+```
+deadbolt --state lifecycle.json grant --credential session-key --scope bucket:read --ttl 600
+```
+
+```
+{"expires_at":1794366844,"grant_id":"46b3f06d72c7424294ddfc408764d3fd","token":"2e04a1e72519d375cb748423d30f44b49548d53ae0536a33840ccaa65d915858"}
+```
+
+Revoke ends that one grant by its id, and no other grant is touched.
+
+```
+deadbolt --state lifecycle.json revoke --grant 46b3f06d72c7424294ddfc408764d3fd
+```
+
+```
+{"revoked":"46b3f06d72c7424294ddfc408764d3fd"}
+```
+
+A second grant stands live against the first value when replace runs.
+
+```
+deadbolt --state lifecycle.json grant --credential session-key --scope bucket:read --ttl 600
+```
+
+```
+{"expires_at":1794367144,"grant_id":"b2eef33b93a0e306f16eb3aa60e7096d","token":"ef649a2f22fd1dc0304dfa6dc75574dd02314d5cfe635483510a26cf2bf4e04f"}
+```
+
+Replace names the new value file and the scopes the new incarnation carries in the act, and it ends every grant that stands live against the old value.
+
+```
+deadbolt --state lifecycle.json replace --name session-key --value-file session-key-v2.txt --scope bucket:read
+```
+
+```
+{"grants_ended":1,"incarnation":2,"replaced":"session-key"}
+```
+
+The grant the replace ended answers revoked, and its token redeems never again.
+
+```
+deadbolt --state lifecycle.json redeem --token ef649a2f22fd1dc0304dfa6dc75574dd02314d5cfe635483510a26cf2bf4e04f --scope bucket:read
+```
+
+```
+error: redeem refused, revoked
+```
+
+A fresh grant against the same name redeems the new value.
+
+```
+deadbolt --state lifecycle.json grant --credential session-key --scope bucket:read --ttl 600
+deadbolt --state lifecycle.json redeem --token 3f7ec457822f483f37603c49ec43b7f8d52e536e9a064c2f5eae2d54d6a323fe --scope bucket:read
+```
+
+```
+{"expires_at":1794367444,"grant_id":"03c52adf66fc1334635a86b37f06b414","token":"3f7ec457822f483f37603c49ec43b7f8d52e536e9a064c2f5eae2d54d6a323fe"}
+SYNTHETIC-TEST-VALUE-session-key-v2
+```
+
+Retire removes the credential, and it ends the grant that stands live against it.
+
+```
+deadbolt --state lifecycle.json retire --name session-key
+```
+
+```
+{"grants_ended":1,"retired":"session-key"}
+```
+
+A later grant against the retired name draws the unknown credential refusal, because no credential by that name stands.
+
+```
+deadbolt --state lifecycle.json grant --credential session-key --scope bucket:read --ttl 600
+```
+
+```
+error: grant refused, no credential named session-key stands
+```
+
 ### Audit
 
 The audit read prints one record per act in order, and the sequence runs gapless from one. Every act stands in the log with its outcome, grants and redemptions and refusals alike, and no record carries a value, a token, or a token hash.
