@@ -36,8 +36,8 @@ pub const INSTANT_MAX: i64 = 253_402_300_799;
 pub const NAME_MAX: usize = 64;
 
 /// A typed broker error. The command line maps the variants to exit
-/// codes, caller errors to 2 and every refusal, corruption, and
-/// permission failure to 1.
+/// codes, caller errors and Io errors to 2, and every refusal,
+/// corruption, and permission failure to 1.
 #[derive(Debug)]
 pub enum Error {
     /// The request itself is malformed, bad names, bad shapes, an
@@ -359,6 +359,17 @@ fn parse_state(text: &str) -> Result<State, Error> {
             }
         }
     }
+    // The live grant check below resolves the credential each
+    // live grant names. The loop above has already refused any
+    // name standing twice, so the names stand proven unique here,
+    // and a map built once answers for every grant exactly what a
+    // search of the vector would answer, at one lookup per grant
+    // instead of one search per grant, audit finding DK-A36.
+    let credentials_by_name: std::collections::HashMap<&str, &Credential> = state
+        .credentials
+        .iter()
+        .map(|credential| (credential.name.as_str(), credential))
+        .collect();
     let mut ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
     let mut hashes: std::collections::HashSet<&str> = std::collections::HashSet::new();
     // Live in DK-2 carries the meaning DK-7 gives it, judged against
@@ -406,11 +417,7 @@ fn parse_state(text: &str) -> Result<State, Error> {
                     // not stand, and no upper bound stands on it,
                     // because a name retired and enrolled again
                     // begins again at 1 beside its ended grants.
-                    match state
-                        .credentials
-                        .iter()
-                        .find(|credential| credential.name == grant.credential)
-                    {
+                    match credentials_by_name.get(grant.credential.as_str()).copied() {
                         None => {
                             return Err(Error::Corrupt(
                                 "a live grant in the state file names a credential that does not stand"
@@ -632,6 +639,10 @@ fn unlock_key(sealed: &Sealed, unlock: &Unlock) -> Result<StoreKey, Error> {
             CustodyLoad::ServiceFailure(_) => Err(Error::Refusal(
                 "the store is locked because the keychain service is not available".to_string(),
             )),
+            CustodyLoad::MalformedEntry(_) => Err(Error::Refusal(
+                "the store is locked because its keychain entry does not hold a store key"
+                    .to_string(),
+            )),
         },
         Route::Passphrase => {
             let passphrase = take_passphrase(unlock)?;
@@ -714,6 +725,35 @@ fn establish_custody(
     }
 }
 
+/// Render a document and seal it in its envelope under a header
+/// and a key.
+///
+/// Every seal of a document in this crate is this one sequence,
+/// the pretty rendering with its trailing newline under the one
+/// serialization wording, so the rendering discipline stands in
+/// exactly one place.
+fn seal_document(state: &State, header: &Header, key: &StoreKey) -> Result<String, Error> {
+    let text = serde_json::to_string_pretty(state).map_err(|_| {
+        Error::Corrupt("the state could not be written in its own format".to_string())
+    })?;
+    envelope::seal(header, key, format!("{text}\n").as_bytes())
+}
+
+/// Open a sealed envelope and strictly read the document inside
+/// it.
+///
+/// Every read of a sealed document in this crate is this one
+/// sequence, the opening, the UTF-8 conversion under the one
+/// wording, and the strict read, so the reading discipline stands
+/// in exactly one place.
+fn open_document(sealed: &envelope::Sealed, key: &StoreKey) -> Result<State, Error> {
+    let plain = envelope::open_sealed(sealed, key)?;
+    let plain_text = String::from_utf8(plain).map_err(|_| {
+        Error::Corrupt("the state document inside the envelope is not valid UTF-8 text".to_string())
+    })?;
+    parse_state(&plain_text)
+}
+
 /// Prove a freshly sealed adoption envelope in memory, DK-23.
 ///
 /// The proof seals the loaded document, decrypts the rendering,
@@ -722,16 +762,9 @@ fn establish_custody(
 /// publish, so a failed proof leaves the plaintext standing exactly
 /// as it stood.
 fn prove_adoption(state: &State, header: &Header, key: &StoreKey) -> Result<(), Error> {
-    let text = serde_json::to_string_pretty(state).map_err(|_| {
-        Error::Corrupt("the state could not be written in its own format".to_string())
-    })?;
-    let rendered = envelope::seal(header, key, format!("{text}\n").as_bytes())?;
+    let rendered = seal_document(state, header, key)?;
     let sealed = envelope::parse_envelope(&rendered)?;
-    let plain = envelope::open_sealed(&sealed, key)?;
-    let plain_text = String::from_utf8(plain).map_err(|_| {
-        Error::Corrupt("the state document inside the envelope is not valid UTF-8 text".to_string())
-    })?;
-    let proven = parse_state(&plain_text)?;
+    let proven = open_document(&sealed, key)?;
     if !state_documents_equal(state, &proven) {
         return Err(Error::Corrupt(
             "the adopted envelope does not decrypt to the document it was sealed from".to_string(),
@@ -803,14 +836,7 @@ impl<'a> Session<'a> {
                         ));
                     }
                     let key = unlock_key(&sealed, unlock)?;
-                    let plain = envelope::open_sealed(&sealed, &key)?;
-                    let plain_text = String::from_utf8(plain).map_err(|_| {
-                        Error::Corrupt(
-                            "the state document inside the envelope is not valid UTF-8 text"
-                                .to_string(),
-                        )
-                    })?;
-                    let state = parse_state(&plain_text)?;
+                    let state = open_document(&sealed, &key)?;
                     match sealed.header.route {
                         Route::Keychain => {
                             if state.store_id != sealed.header.store {
@@ -950,10 +976,7 @@ impl<'a> Session<'a> {
                 ))
             }
         };
-        let text = serde_json::to_string_pretty(&self.state).map_err(|_| {
-            Error::Corrupt("the state could not be written in its own format".to_string())
-        })?;
-        let sealed_text = envelope::seal(header, key, format!("{text}\n").as_bytes())?;
+        let sealed_text = seal_document(&self.state, header, key)?;
         let directory = self
             .state_path
             .parent()
@@ -1026,9 +1049,11 @@ impl<'a> Session<'a> {
 }
 
 fn hex(bytes: &[u8]) -> String {
+    const NIBBLES: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
-        out.push_str(&format!("{byte:02x}"));
+        out.push(NIBBLES[(byte >> 4) as usize] as char);
+        out.push(NIBBLES[(byte & 0x0f) as usize] as char);
     }
     out
 }

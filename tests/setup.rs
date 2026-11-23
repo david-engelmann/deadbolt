@@ -266,6 +266,19 @@ fn scan_tree(root: &Path) -> ScanOutput {
     }
 }
 
+fn scan_tree_with_extra(root: &Path, extra: &str) -> ScanOutput {
+    let output = Command::new(env!("CARGO_BIN_EXE_codepoint_scan"))
+        .arg(root)
+        .arg(extra)
+        .output()
+        .unwrap();
+    ScanOutput {
+        status: output.status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    }
+}
+
 #[test]
 fn codepoint_scan_reports_zero_for_the_repo() {
     let result = scan_tree(&root());
@@ -470,4 +483,58 @@ fn codepoint_scan_skips_a_dangling_symlink() {
     let result = scan_tree(&dir);
     assert_eq!(result.status, 0, "{}", result.stderr);
     assert!(result.stdout.contains("em dash U+2014 count 0"));
+}
+
+// Audit finding DK-A42: the scanner refuses an argument standing
+// after the scan root. Before the fix the extra argument was
+// dropped silently and the scan answered for the root alone, so
+// the first pin below failed on the missing refusal and the
+// second on the count report the old code printed instead.
+
+#[test]
+fn codepoint_scan_refuses_an_argument_after_the_root() {
+    let dir = temp_dir("extra-argument");
+    std::fs::write(dir.join("clean.md"), "clean").unwrap();
+    let result = scan_tree_with_extra(&dir, "second-root");
+    assert_eq!(result.status, 2, "{}", result.stdout);
+    assert!(
+        result.stderr.contains("at most one argument"),
+        "{}",
+        result.stderr
+    );
+    assert_eq!(result.stderr.lines().count(), 1, "{}", result.stderr);
+    assert!(result.stdout.is_empty(), "{}", result.stdout);
+}
+
+#[test]
+fn codepoint_scan_refuses_an_extra_argument_before_scanning() {
+    let dir = temp_dir("extra-argument-dirty");
+    std::fs::write(dir.join("note.md"), "a\u{2014}b").unwrap();
+    let result = scan_tree_with_extra(&dir, "second-root");
+    assert_eq!(result.status, 2, "{}", result.stdout);
+    assert!(result.stdout.is_empty(), "{}", result.stdout);
+}
+
+// Audit finding DK-A44: the scanner answers a scan error at exit 2
+// when the scan root does not stand, a deliberate difference from
+// the setup scanner the module record names, which exited 0 with
+// zero counts. This pin is a preservation pin: it passes against
+// the standing code by design and fails on the plausible wrong
+// form, a scanner that reads a missing root as an empty tree and
+// answers the zero counts at exit 0.
+
+#[test]
+fn codepoint_scan_refuses_a_root_that_does_not_stand() {
+    let dir = temp_dir("missing-root");
+    let missing = dir.join("no-such-tree");
+    let result = scan_tree(&missing);
+    assert_eq!(result.status, 2, "{}", result.stdout);
+    assert!(result.stderr.contains("cannot read"), "{}", result.stderr);
+    assert!(
+        result.stderr.contains(&missing.display().to_string()),
+        "{}",
+        result.stderr
+    );
+    assert_eq!(result.stderr.lines().count(), 1, "{}", result.stderr);
+    assert!(result.stdout.is_empty(), "{}", result.stdout);
 }
