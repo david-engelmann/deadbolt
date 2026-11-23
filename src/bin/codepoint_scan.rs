@@ -29,6 +29,7 @@
 //! because a read on one can block forever, and a gate step must
 //! always terminate with a verdict.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -95,11 +96,12 @@ fn collect(root: &Path, out: &mut Vec<PathBuf>) -> Result<(), ScanError> {
     Ok(())
 }
 
-fn scan(root: &Path) -> Result<(usize, usize), ScanError> {
+fn scan(root: &Path) -> Result<(usize, usize, Vec<String>), ScanError> {
     let mut files = Vec::new();
     collect(root, &mut files)?;
     let mut em_count = 0;
     let mut en_count = 0;
+    let mut hits = Vec::new();
     for path in &files {
         let bytes = std::fs::read(path)
             .map_err(|err| ScanError(format!("cannot read {}, {err}", path.display())))?;
@@ -109,42 +111,82 @@ fn scan(root: &Path) -> Result<(usize, usize), ScanError> {
         let file_em = text.matches(EM_DASH).count();
         let file_en = text.matches(EN_DASH).count();
         if file_em > 0 || file_en > 0 {
-            println!("{}: em dash {file_em}, en dash {file_en}", path.display());
+            hits.push(format!(
+                "{}: em dash {file_em}, en dash {file_en}",
+                path.display()
+            ));
         }
         em_count += file_em;
         en_count += file_en;
     }
-    Ok((em_count, en_count))
+    Ok((em_count, en_count, hits))
 }
 
 /// The scan root is the call's one optional argument, converted
 /// strictly from its operating system form, audit finding DK-A9.
 /// An argument that is not valid Unicode text is a scan error at
 /// exit 2, where std::env::args() panicked and exited 101 before.
+/// An argument standing after the root is a scan error at exit 2
+/// as well, audit finding DK-A42: the scan serves the one root
+/// its call names, and no part of a call is dropped silently.
 fn main() -> ExitCode {
     let root = match std::env::args_os().nth(1) {
         Some(arg) => match arg.into_string() {
             Ok(text) => PathBuf::from(text),
             Err(_) => {
-                eprintln!("scan error, an argument is not valid Unicode text");
+                scan_error_line("an argument is not valid Unicode text");
                 return ExitCode::from(2);
             }
         },
         None => PathBuf::from("."),
     };
+    if std::env::args_os().nth(2).is_some() {
+        eprintln!("scan error, the scan takes at most one argument, the scan root");
+        return ExitCode::from(2);
+    }
     match scan(&root) {
-        Ok((em_count, en_count)) => {
-            println!("em dash U+2014 count {em_count}");
-            println!("en dash U+2013 count {en_count}");
-            if em_count > 0 || en_count > 0 {
-                ExitCode::from(1)
-            } else {
-                ExitCode::from(0)
+        Ok((em_count, en_count, hits)) => {
+            let mut report = String::new();
+            for hit in &hits {
+                report.push_str(hit);
+                report.push('\n');
+            }
+            report.push_str(&format!("em dash U+2014 count {em_count}\n"));
+            report.push_str(&format!("en dash U+2013 count {en_count}\n"));
+            let stdout = std::io::stdout();
+            let mut lock = stdout.lock();
+            let written = lock.write_all(report.as_bytes()).and_then(|_| lock.flush());
+            match written {
+                Ok(()) => {
+                    if em_count > 0 || en_count > 0 {
+                        ExitCode::from(1)
+                    } else {
+                        ExitCode::from(0)
+                    }
+                }
+                Err(err) => {
+                    scan_error_line(&format!("the report could not be written because {err}"));
+                    ExitCode::from(2)
+                }
             }
         }
         Err(ScanError(message)) => {
-            eprintln!("scan error, {message}");
+            scan_error_line(&message);
             ExitCode::from(2)
         }
     }
+}
+
+/// Write the one scan error line to standard error through a
+/// fallible write that never panics, audit finding DK-A23. The
+/// print macros panic when a write fails, and a failed write on
+/// the error line itself would replace the exit code with the
+/// panic's 101, outside the exits this scanner states. A failure
+/// here has no channel left to report through and is let go, so
+/// the exit code always stands.
+fn scan_error_line(message: &str) {
+    let stderr = std::io::stderr();
+    let mut lock = stderr.lock();
+    let _ = lock.write_all(format!("scan error, {message}\n").as_bytes());
+    let _ = lock.flush();
 }

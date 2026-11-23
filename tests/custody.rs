@@ -14,6 +14,13 @@ use deadbolt::custody::{
 };
 use zeroize::Zeroizing;
 
+// The shared test harness home of audit finding DK-A19. Items a
+// suite does not use stand allowed dead in its crate.
+#[allow(dead_code)]
+mod common;
+
+use common::hex;
+
 const STORE_ID: &str = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
 const OTHER_STORE_ID: &str = "2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e1fca7e58b3";
 
@@ -36,10 +43,6 @@ fn sample_key() -> StoreKey {
 
 fn other_key() -> StoreKey {
     StoreKey::new([0xa5; 32])
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 #[test]
