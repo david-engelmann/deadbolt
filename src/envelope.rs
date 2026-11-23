@@ -50,7 +50,7 @@ pub fn key_did_not_open() -> Error {
 ///
 /// The header carries exactly the fields its route uses and no
 /// others, and it never carries key material in any form, DK-15.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Header {
     /// The format name of the inner document.
     pub payload: String,
@@ -64,7 +64,7 @@ pub struct Header {
 }
 
 /// The derivation parameters a passphrase header records, DK-15.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Kdf {
     /// The memory cost in kibibytes.
     pub memory: u32,
