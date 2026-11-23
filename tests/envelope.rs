@@ -9,13 +9,17 @@
 //! stand behind, and the passphrase route runs directly, which is
 //! the standing limit DK-24 names.
 
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
+// The shared test harness home of audit finding DK-A19. Items a
+// suite does not use stand allowed dead in its crate.
+#[allow(dead_code)]
+mod common;
+
+use common::{decrypt_document, hex, hex_bytes, read_scope, set_mode, state_text};
 use deadbolt::custody::{CustodyLoad, FixtureCustody, KeyCustody, StoreKey};
-use deadbolt::{Error, PassphraseSource, Route, Scope, Unlock, Zeroizing};
+use deadbolt::{Error, PassphraseSource, Route, Unlock, Zeroizing};
 
 const VALUE: &str = "SYNTHETIC-TEST-VALUE-quiet-foxglove-7341";
 const PASSPHRASE: &str = "SYNTHETIC-TEST-VALUE-copper-lantern-9911";
@@ -28,24 +32,8 @@ const LOCKED_BAD_KEY: &str = "the store is locked because the key did not open i
 const LOCKED_TRANSPLANT: &str =
     "the store is locked because the envelope does not belong to this store";
 
-static COUNTER: AtomicUsize = AtomicUsize::new(0);
-
 fn test_dir(tag: &str) -> PathBuf {
-    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-    let dir = std::env::temp_dir().join(format!(
-        "deadbolt-envelope-test-{}-{tag}-{n}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
-
-fn read_scope() -> Scope {
-    Scope {
-        resource: "bucket".to_string(),
-        action: "read".to_string(),
-    }
+    common::test_dir("deadbolt-envelope-test", tag)
 }
 
 /// A passphrase supply answering one fixed answer, or none.
@@ -96,16 +84,8 @@ impl Ctx {
     }
 }
 
-fn state_text(state: &PathBuf) -> String {
-    std::fs::read_to_string(state).unwrap()
-}
-
 fn envelope_json(state: &PathBuf) -> serde_json::Value {
     serde_json::from_str(&state_text(state)).unwrap()
-}
-
-fn set_mode(state: &PathBuf, mode: u32) {
-    std::fs::set_permissions(state, std::fs::Permissions::from_mode(mode)).unwrap();
 }
 
 fn write_store_file(dir: &Path, text: &str) -> PathBuf {
@@ -113,49 +93,6 @@ fn write_store_file(dir: &Path, text: &str) -> PathBuf {
     std::fs::write(&state, text).unwrap();
     set_mode(&state, 0o600);
     state
-}
-
-fn hex(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push_str(&format!("{byte:02x}"));
-    }
-    out
-}
-
-fn hex_bytes(text: &str) -> Vec<u8> {
-    let bytes = text.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len() / 2);
-    let mut index = 0;
-    while index < bytes.len() {
-        let high = (bytes[index] as char).to_digit(16).unwrap();
-        let low = (bytes[index + 1] as char).to_digit(16).unwrap();
-        out.push((high * 16 + low) as u8);
-        index += 2;
-    }
-    out
-}
-
-/// Decrypt the document inside an envelope under a known key, the
-/// same helper shape tests/deadbolt.rs carries.
-fn decrypt_document(raw: &str, key: &StoreKey) -> String {
-    use chacha20poly1305::aead::{Aead, Payload};
-    use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce};
-    let envelope: serde_json::Value = serde_json::from_str(raw).unwrap();
-    let header = envelope["header"].to_string();
-    let nonce = hex_bytes(envelope["nonce"].as_str().unwrap());
-    let ciphertext = hex_bytes(envelope["ciphertext"].as_str().unwrap());
-    let cipher = XChaCha20Poly1305::new(chacha20poly1305::Key::from_slice(key.as_bytes()));
-    let plain = cipher
-        .decrypt(
-            XNonce::from_slice(&nonce),
-            Payload {
-                msg: &ciphertext,
-                aad: header.as_bytes(),
-            },
-        )
-        .unwrap();
-    String::from_utf8(plain).unwrap()
 }
 
 /// The decrypted document of a keychain store the context's fixture
