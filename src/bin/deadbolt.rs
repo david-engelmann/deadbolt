@@ -257,6 +257,24 @@ fn parse_scope(text: &str) -> Result<Scope, Error> {
     })
 }
 
+/// The scopes one command names, collected and parsed.
+///
+/// Enroll, rotate, and replace share this collection: the scope
+/// options as they stand, at least one of them, each parsed
+/// through parse_scope. The refusal for an empty list names the
+/// act, as each arm has always spoken it. Audit finding DK-A18.
+fn scopes_option(options: &Options, act: &str) -> Result<Vec<Scope>, Error> {
+    let scope_texts = options.many("--scope");
+    if scope_texts.is_empty() {
+        return Err(caller(&format!("{act} names at least one scope")));
+    }
+    let mut scopes = Vec::new();
+    for text in &scope_texts {
+        scopes.push(parse_scope(text)?);
+    }
+    Ok(scopes)
+}
+
 fn read_value_file(path: &str) -> Result<String, Error> {
     let text = std::fs::read_to_string(path)
         .map_err(|_| caller("the value file cannot be read as text"))?;
@@ -304,14 +322,7 @@ fn run(args: &[String]) -> Result<String, Error> {
             let options = Options::parse(rest, &["--name", "--value-file", "--scope"], &[])?;
             let name = options.required("--name")?;
             let value_file = options.required("--value-file")?;
-            let scope_texts = options.many("--scope");
-            if scope_texts.is_empty() {
-                return Err(caller("enroll names at least one scope"));
-            }
-            let mut scopes = Vec::new();
-            for text in &scope_texts {
-                scopes.push(parse_scope(text)?);
-            }
+            let scopes = scopes_option(&options, "enroll")?;
             let value = read_value_file(&value_file)?;
             deadbolt::enroll(&state, &unlock, &name, &value, &scopes, now)?;
             Ok(format!("{}\n", serde_json::json!({"enrolled": name})))
@@ -331,14 +342,7 @@ fn run(args: &[String]) -> Result<String, Error> {
             let name = options.required("--name")?;
             let new_name = options.required("--new-name")?;
             let value_file = options.required("--value-file")?;
-            let scope_texts = options.many("--scope");
-            if scope_texts.is_empty() {
-                return Err(caller("rotate names at least one scope"));
-            }
-            let mut scopes = Vec::new();
-            for text in &scope_texts {
-                scopes.push(parse_scope(text)?);
-            }
+            let scopes = scopes_option(&options, "rotate")?;
             let value = read_value_file(&value_file)?;
             let ended = deadbolt::rotate(&state, &unlock, &name, &new_name, &value, &scopes, now)?;
             Ok(format!(
@@ -350,14 +354,7 @@ fn run(args: &[String]) -> Result<String, Error> {
             let options = Options::parse(rest, &["--name", "--value-file", "--scope"], &[])?;
             let name = options.required("--name")?;
             let value_file = options.required("--value-file")?;
-            let scope_texts = options.many("--scope");
-            if scope_texts.is_empty() {
-                return Err(caller("replace names at least one scope"));
-            }
-            let mut scopes = Vec::new();
-            for text in &scope_texts {
-                scopes.push(parse_scope(text)?);
-            }
+            let scopes = scopes_option(&options, "replace")?;
             let value = read_value_file(&value_file)?;
             let (ended, incarnation) =
                 deadbolt::replace(&state, &unlock, &name, &value, &scopes, now)?;
