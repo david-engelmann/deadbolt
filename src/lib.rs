@@ -1071,6 +1071,24 @@ fn random_hex(bytes: usize) -> Result<String, Error> {
     Ok(hex(&buffer))
 }
 
+/// End every grant of one credential that stands live at the
+/// instant, unended and strictly before its expiry, stamping the
+/// instant and the reason retired, and return how many grants
+/// ended, DK-4 and DK-7. Retire, rotate, and replace share this
+/// one shape. Cutoff ends grants by run under its own reason and
+/// stands apart. Audit finding DK-A16.
+fn end_live_grants(grants: &mut [Grant], name: &str, now: i64) -> usize {
+    let mut ended = 0;
+    for grant in grants.iter_mut() {
+        if grant.credential == name && grant.ended_at.is_none() && now < grant.expires_at {
+            grant.ended_at = Some(now);
+            grant.end_reason = Some("retired".to_string());
+            ended += 1;
+        }
+    }
+    ended
+}
+
 /// Enroll a credential with its value and allowed scopes, DK-3.
 pub fn enroll(
     state_path: &Path,
@@ -1146,14 +1164,7 @@ pub fn retire(state_path: &Path, unlock: &Unlock, name: &str, now: i64) -> Resul
             "retire refused, no credential named {name} stands"
         )));
     }
-    let mut ended = 0;
-    for grant in session.state.grants.iter_mut() {
-        if grant.credential == name && grant.ended_at.is_none() && now < grant.expires_at {
-            grant.ended_at = Some(now);
-            grant.end_reason = Some("retired".to_string());
-            ended += 1;
-        }
-    }
+    let ended = end_live_grants(&mut session.state.grants, name, now);
     session
         .state
         .credentials
@@ -1226,14 +1237,7 @@ pub fn rotate(
             "rotate refused, a credential named {successor} already stands"
         )));
     }
-    let mut ended = 0;
-    for grant in session.state.grants.iter_mut() {
-        if grant.credential == predecessor && grant.ended_at.is_none() && now < grant.expires_at {
-            grant.ended_at = Some(now);
-            grant.end_reason = Some("retired".to_string());
-            ended += 1;
-        }
-    }
+    let ended = end_live_grants(&mut session.state.grants, predecessor, now);
     session.state.credentials.push(Credential {
         name: successor.to_string(),
         value: value.to_string(),
@@ -1327,14 +1331,7 @@ pub fn replace(
             )));
         }
     };
-    let mut ended = 0;
-    for grant in session.state.grants.iter_mut() {
-        if grant.credential == name && grant.ended_at.is_none() && now < grant.expires_at {
-            grant.ended_at = Some(now);
-            grant.end_reason = Some("retired".to_string());
-            ended += 1;
-        }
-    }
+    let ended = end_live_grants(&mut session.state.grants, name, now);
     let credential = &mut session.state.credentials[position];
     credential.value = value.to_string();
     credential.scopes = scopes.to_vec();
