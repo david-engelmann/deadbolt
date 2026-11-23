@@ -1,5 +1,5 @@
-//! Protocol tests for the broker core, pinning DK-1 to DK-14 over
-//! stores the envelope of DK-15 to DK-24 seals.
+//! Protocol tests for the broker core, pinning DK-1 to DK-14 and
+//! DK-25 to DK-27 over stores the envelope of DK-15 to DK-24 seals.
 //! Every fixture is synthetic and names itself as one. Credential
 //! shaped strings carry the SYNTHETIC-TEST-VALUE marker so no fixture
 //! can be mistaken for a real key.
