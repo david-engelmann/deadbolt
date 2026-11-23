@@ -116,8 +116,18 @@ pub enum CustodyLoad {
     /// The store holds no key under this store identifier.
     Absent,
     /// The custody service could not be reached or answered wrongly.
-    /// The string is the diagnostic the store layer surfaces.
+    /// The string is a diagnostic carried for the caller's
+    /// classification. The store layer deliberately never prints
+    /// it, and every refusal on this outcome speaks in the fixed
+    /// wording DK-22 names, so backend text reaches no output.
     ServiceFailure(String),
+    /// The service answered and an entry stands under this store
+    /// identifier, but the bytes it holds are not a store key.
+    /// The case is neither an absence nor a service failure, and
+    /// DK-22 as amended words it apart from both. The string is
+    /// the diagnostic the backend reported, held to the same
+    /// never printed discipline as the service failure string.
+    MalformedEntry(String),
 }
 
 /// A custody operation that failed outside the load outcome taxonomy.
@@ -210,8 +220,10 @@ pub fn derive_key_with_params(
 /// wrong length under a store entry are still key material standing
 /// in the clear. It answers none when the length differs from the
 /// key length, and the caller captures the length before the call
-/// so the service failure wording that names the held byte count
-/// stands word for word. DK-18 states the discipline this brings
+/// so the diagnostic it builds can name the held byte count. The
+/// diagnostic travels inside the service failure outcome and,
+/// like every backend diagnostic, is carried for classification
+/// and never printed. DK-18 states the discipline this brings
 /// the load path under, that keys cross the seam in a zeroizing
 /// type and are wiped on drop.
 pub fn store_key_from_secret(secret: &mut Vec<u8>) -> Option<StoreKey> {
@@ -328,7 +340,7 @@ mod platform {
                     let held = bytes.len();
                     match store_key_from_secret(&mut bytes) {
                         Some(key) => CustodyLoad::Key(key),
-                        None => CustodyLoad::ServiceFailure(format!(
+                        None => CustodyLoad::MalformedEntry(format!(
                             "the keychain entry for this store holds {held} bytes and a store key is {KEY_LEN} bytes"
                         )),
                     }
@@ -369,9 +381,8 @@ mod fixture {
 
     /// The tests-only custody backend, holding keys in memory.
     ///
-    /// The fixture answers each of the three load outcomes the seam
-    /// defines, a stored key, an absent key, and a service failure the
-    /// test arms and clears. It is compiled only under the
+    /// The fixture answers a stored key, an absent key, and a service
+    /// failure the test arms and clears. It is compiled only under the
     /// custody-fixture feature, a public feature that exists for this
     /// crate's own tests, and a consumer who enables that feature
     /// links it. No production code path in this crate constructs it.
