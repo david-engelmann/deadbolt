@@ -199,7 +199,7 @@ impl std::fmt::Debug for GrantReceipt {
 
 /// One audit entry. Entries never carry a value, a token, or a token
 /// hash, so the whole record is safe to print.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuditEntry {
     pub seq: u64,
@@ -228,7 +228,7 @@ fn incarnation_stands_at_one(incarnation: &u64) -> bool {
     *incarnation <= 1
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Credential {
     name: String,
@@ -242,7 +242,7 @@ struct Credential {
     incarnation: u64,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Grant {
     id: String,
@@ -262,7 +262,7 @@ struct Grant {
     incarnation: u64,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct State {
     format: String,
@@ -478,57 +478,12 @@ fn check_stored_instant(instant: i64) -> Result<(), Error> {
 /// against the document its rendered envelope decrypts to, and the
 /// comparison runs over the document fields rather than rendered
 /// bytes, because the proof vouches for the document and the
-/// envelope is only its carrier.
+/// envelope is only its carrier. The comparison is the derived
+/// equality of the document structures, audit finding DK-A17,
+/// so it covers every field the structures carry by
+/// construction and cannot drift from them.
 fn state_documents_equal(a: &State, b: &State) -> bool {
-    if a.format != b.format || a.store_id != b.store_id {
-        return false;
-    }
-    if a.credentials.len() != b.credentials.len()
-        || a.grants.len() != b.grants.len()
-        || a.audit.len() != b.audit.len()
-    {
-        return false;
-    }
-    for (mine, theirs) in a.credentials.iter().zip(b.credentials.iter()) {
-        if mine.name != theirs.name
-            || mine.value != theirs.value
-            || mine.scopes != theirs.scopes
-            || mine.enrolled_at != theirs.enrolled_at
-            || mine.incarnation != theirs.incarnation
-        {
-            return false;
-        }
-    }
-    for (mine, theirs) in a.grants.iter().zip(b.grants.iter()) {
-        if mine.id != theirs.id
-            || mine.credential != theirs.credential
-            || mine.resource != theirs.resource
-            || mine.action != theirs.action
-            || mine.run_id != theirs.run_id
-            || mine.token_hash != theirs.token_hash
-            || mine.granted_at != theirs.granted_at
-            || mine.expires_at != theirs.expires_at
-            || mine.ended_at != theirs.ended_at
-            || mine.end_reason != theirs.end_reason
-            || mine.incarnation != theirs.incarnation
-        {
-            return false;
-        }
-    }
-    for (mine, theirs) in a.audit.iter().zip(b.audit.iter()) {
-        if mine.seq != theirs.seq
-            || mine.at != theirs.at
-            || mine.kind != theirs.kind
-            || mine.credential != theirs.credential
-            || mine.resource != theirs.resource
-            || mine.action != theirs.action
-            || mine.run_id != theirs.run_id
-            || mine.outcome != theirs.outcome
-        {
-            return false;
-        }
-    }
-    true
+    a == b
 }
 
 /// Request shape validation. Failures here are caller errors, raised
