@@ -12,6 +12,7 @@
 //! file now holds the envelope and the document stands inside it.
 //! The envelope's own pins stand in tests/envelope.rs.
 
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -131,6 +132,7 @@ fn cli_document_json(state: &PathBuf) -> serde_json::Value {
     serde_json::from_str(&decrypt_document(&raw, &key)).unwrap()
 }
 
+#[cfg(unix)]
 fn mode_of(state: &PathBuf) -> u32 {
     std::fs::metadata(state).unwrap().permissions().mode() & 0o777
 }
@@ -664,6 +666,9 @@ fn refusals_against_a_missing_state_create_no_file() {
     assert!(!state.exists());
 }
 
+// Portability adaptation gates POSIX 0600 mode checks to Unix per the
+// portability amendment in CONTRACT.md.
+#[cfg(unix)]
 #[test]
 fn permission_gate_refuses_every_operation_and_recovers() {
     let dir = test_dir("permission-gate");
@@ -695,6 +700,7 @@ fn permission_gate_refuses_every_operation_and_recovers() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn state_file_is_created_owner_only_and_stays_so() {
     let dir = test_dir("mode-creation");
@@ -704,6 +710,58 @@ fn state_file_is_created_owner_only_and_stays_so() {
     assert_eq!(mode_of(&state), 0o600);
     deadbolt::grant(&state, &h.open(), "cache-key", &read_scope(), 60, None, T0).unwrap();
     assert_eq!(mode_of(&state), 0o600);
+}
+
+#[cfg(unix)]
+#[test]
+fn lock_acquisition_recovers_when_an_unlinked_lock_is_held() {
+    use fs2::FileExt;
+    let dir = test_dir("lock-inode-race");
+    let state = dir.join("state.json");
+    let lock_path = dir.join("state.json.lock");
+    let old_lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .unwrap();
+    old_lock.lock_exclusive().unwrap();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let state_clone = state.clone();
+    let handle = std::thread::spawn(move || {
+        let h = Harness::new();
+        ready_tx.send(()).unwrap();
+        enroll_a(&h, &state_clone);
+        done_tx.send(()).unwrap();
+    });
+    ready_rx.recv().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    std::fs::remove_file(&lock_path).unwrap();
+    let replacement_lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .unwrap();
+    replacement_lock.lock_exclusive().unwrap();
+    drop(old_lock);
+    assert!(
+        done_rx
+            .recv_timeout(std::time::Duration::from_millis(80))
+            .is_err(),
+        "enroll must not proceed under the unlinked lock while replacement_lock stands held"
+    );
+    assert!(!state.exists());
+    drop(replacement_lock);
+    done_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    handle.join().unwrap();
+    assert!(lock_path.is_file());
+    assert!(state.is_file());
 }
 
 fn corrupt_variants() -> Vec<(String, String)> {
@@ -1434,6 +1492,9 @@ fn missing_state_acts_create_the_lock_file_but_no_state_file() {
     assert!(lock_path(&state).exists());
 }
 
+// Portability adaptation gates POSIX 0600 lock mode checks to Unix per
+// the portability amendment in CONTRACT.md.
+#[cfg(unix)]
 #[test]
 fn lock_file_is_created_owner_only() {
     let dir = test_dir("lock-mode");

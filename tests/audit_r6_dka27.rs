@@ -19,6 +19,7 @@
 //! here touches a real keychain: the store stands on the fixture
 //! backend behind the custody seam.
 
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -96,7 +97,15 @@ fn state_text(state: &PathBuf) -> String {
 }
 
 fn set_mode(state: &PathBuf, mode: u32) {
-    std::fs::set_permissions(state, std::fs::Permissions::from_mode(mode)).unwrap();
+    // Portability adaptation applies POSIX mode bits on Unix only.
+    #[cfg(unix)]
+    {
+        std::fs::set_permissions(state, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (state, mode);
+    }
 }
 
 fn write_store_file(dir: &Path, text: &str) -> PathBuf {

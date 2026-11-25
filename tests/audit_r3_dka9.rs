@@ -10,12 +10,21 @@
 //! that decode as no text at all, passed to each binary as an
 //! operating system argument exactly as a shell would pass it.
 
-use std::ffi::OsStr;
-use std::os::unix::ffi::OsStrExt;
+use std::ffi::OsString;
 use std::process::Command;
 
-fn non_unicode_argument() -> &'static OsStr {
-    OsStr::from_bytes(b"\xff\xfe")
+// Portability adaptation builds invalid UTF-8 bytes on Unix and an
+// unpaired UTF-16 surrogate on Windows so both OS string forms are pinned.
+#[cfg(unix)]
+fn non_unicode_argument() -> OsString {
+    use std::os::unix::ffi::OsStringExt;
+    OsString::from_vec(b"\xff\xfe".to_vec())
+}
+
+#[cfg(windows)]
+fn non_unicode_argument() -> OsString {
+    use std::os::windows::ffi::OsStringExt;
+    OsString::from_wide(&[0xD800])
 }
 
 #[test]

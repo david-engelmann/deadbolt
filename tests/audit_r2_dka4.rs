@@ -11,6 +11,7 @@
 //! state file has been replaced by a non-empty directory the
 //! rename cannot land on. No test here touches a real keychain.
 
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -126,7 +127,11 @@ fn plaintext_store(dir: &Path) -> PathBuf {
     let document = decrypt_document(&raw, &key);
     let state = dir.join("state.json");
     std::fs::write(&state, document).unwrap();
-    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o600)).unwrap();
+    // Portability adaptation applies POSIX 0600 mode bits on Unix only.
+    #[cfg(unix)]
+    {
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
     state
 }
 
