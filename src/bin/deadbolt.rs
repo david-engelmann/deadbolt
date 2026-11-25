@@ -16,7 +16,7 @@ use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, SystemTimeError, UNIX_EPOCH};
 
 use deadbolt::custody::KeyCustody;
 #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
@@ -84,11 +84,17 @@ fn caller(message: &str) -> Error {
     Error::Caller(message.to_string())
 }
 
-fn now_seconds() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs() as i64)
-        .unwrap_or(0)
+fn now_seconds() -> Result<i64, Error> {
+    instant_seconds(SystemTime::now().duration_since(UNIX_EPOCH))
+}
+
+/// The conversion the clock read stands on, factored so a pin can
+/// hold both of its arms, perfection finding DK-P2. A system time
+/// standing before the epoch is a caller error naming the case,
+/// never the epoch itself standing in as the current instant.
+fn instant_seconds(read: Result<Duration, SystemTimeError>) -> Result<i64, Error> {
+    read.map(|duration| duration.as_secs() as i64)
+        .map_err(|_| caller("the system clock stands before the epoch"))
 }
 
 /// The command line's passphrase supply, DK-19.
@@ -331,7 +337,7 @@ fn run(args: &[String]) -> Result<String, Error> {
         caller("the command is not one of enroll, retire, rotate, replace, grant, redeem, revoke, cutoff, audit")
     })?;
     let rest = &args[index + 1..];
-    let now = now_seconds();
+    let now = now_seconds()?;
     let backend = platform_backend();
     let passphrase = CliPassphrase::from_environment();
     let unlock = Unlock {
@@ -463,5 +469,26 @@ fn run(args: &[String]) -> Result<String, Error> {
         _ => Err(caller(
             "the command is not one of enroll, retire, rotate, replace, grant, redeem, revoke, cutoff, audit",
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_clock_standing_before_the_epoch_answers_the_caller_error() {
+        let before = UNIX_EPOCH - Duration::from_secs(1);
+        let read = before.duration_since(UNIX_EPOCH);
+        assert!(read.is_err());
+        let err = instant_seconds(read).unwrap_err();
+        assert!(matches!(err, Error::Caller(_)));
+        assert_eq!(format!("{err}"), "the system clock stands before the epoch");
+    }
+
+    #[test]
+    fn a_clock_at_or_after_the_epoch_builds_its_instant() {
+        assert_eq!(instant_seconds(Ok(Duration::ZERO)).unwrap(), 0);
+        assert_eq!(instant_seconds(Ok(Duration::from_secs(90))).unwrap(), 90);
     }
 }
