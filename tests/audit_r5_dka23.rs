@@ -83,6 +83,21 @@ fn run_scanner(root: &Path) -> CliOutput {
     }
 }
 
+fn run_scanner_with_surplus_on_full_stderr(root: &Path) -> CliOutput {
+    let output = Command::new(env!("CARGO_BIN_EXE_codepoint_scan"))
+        .arg(root)
+        .arg("second-root")
+        .stdout(Stdio::piped())
+        .stderr(full_stream())
+        .output()
+        .unwrap();
+    CliOutput {
+        status: output.status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    }
+}
+
 #[test]
 fn a_successful_act_whose_report_cannot_be_written_exits_2() {
     let dir = test_dir("full-stdout");
@@ -190,4 +205,17 @@ fn the_scanner_answers_a_full_stdout_on_a_dash_hit_as_a_scan_error() {
     );
     assert_eq!(out.stderr.lines().count(), 1, "{}", out.stderr);
     assert!(!out.stderr.contains("panicked"), "{}", out.stderr);
+}
+
+#[test]
+fn the_scanners_surplus_refusal_keeps_its_exit_when_standard_error_refuses() {
+    let dir = test_dir("scanner-surplus-full-stderr");
+    std::fs::write(dir.join("clean.md"), "clean").unwrap();
+    // The surplus argument refusal at exit 2. With standard error
+    // standing on /dev/full the refusal line cannot be written,
+    // and the exit code still stands at 2, where the bare print
+    // panicked on the failed write and exited 101 before the fix.
+    let out = run_scanner_with_surplus_on_full_stderr(&dir);
+    assert_eq!(out.status, 2);
+    assert!(out.stdout.is_empty());
 }

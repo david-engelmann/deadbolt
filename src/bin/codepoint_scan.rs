@@ -142,7 +142,7 @@ fn main() -> ExitCode {
         None => PathBuf::from("."),
     };
     if std::env::args_os().nth(2).is_some() {
-        eprintln!("scan error, the scan takes at most one argument, the scan root");
+        scan_error_line("the scan takes at most one argument, the scan root");
         return ExitCode::from(2);
     }
     match scan(&root) {
