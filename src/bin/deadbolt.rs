@@ -106,16 +106,27 @@ fn instant_seconds(read: Result<Duration, SystemTimeError>) -> Result<i64, Error
 /// with echo disabled, and the prompted value is asked at most once
 /// per invocation and kept in zeroizing memory.
 struct CliPassphrase {
-    from_env: Option<Zeroizing<String>>,
+    from_env: Option<Zeroizing<Vec<u8>>>,
+    prompt_label: &'static str,
     prompted: Mutex<Option<Zeroizing<String>>>,
 }
 
 impl CliPassphrase {
-    fn from_environment() -> CliPassphrase {
+    fn from_env_var(var_name: &str, prompt_label: &'static str) -> CliPassphrase {
+        let from_env = std::env::var_os(var_name).map(|val| {
+            #[cfg(unix)]
+            {
+                use std::os::unix::ffi::OsStringExt;
+                Zeroizing::new(val.into_vec())
+            }
+            #[cfg(not(unix))]
+            {
+                Zeroizing::new(val.to_string_lossy().as_bytes().to_vec())
+            }
+        });
         CliPassphrase {
-            from_env: std::env::var("DEADBOLT_PASSPHRASE")
-                .ok()
-                .map(Zeroizing::new),
+            from_env,
+            prompt_label,
             prompted: Mutex::new(None),
         }
     }
@@ -124,14 +135,14 @@ impl CliPassphrase {
 impl PassphraseSource for CliPassphrase {
     fn passphrase(&self) -> Option<Zeroizing<Vec<u8>>> {
         if let Some(value) = &self.from_env {
-            return Some(Zeroizing::new(value.as_bytes().to_vec()));
+            return Some(Zeroizing::new((**value).clone()));
         }
         if !std::io::stdin().is_terminal() {
             return None;
         }
         let mut slot = self.prompted.lock().ok()?;
         if slot.is_none() {
-            *slot = rpassword::prompt_password("passphrase: ")
+            *slot = rpassword::prompt_password(self.prompt_label)
                 .ok()
                 .map(Zeroizing::new);
         }
@@ -313,11 +324,18 @@ fn read_value_file(path: &str) -> Result<String, Error> {
     Ok(stripped.to_string())
 }
 
+const USAGE_TEXT: &str = "usage, deadbolt --state PATH with an optional --route keychain or passphrase and then one of enroll, retire, rotate, replace, grant, redeem, revoke, cutoff, audit, status, rekey";
+
 fn run(args: &[String]) -> Result<String, Error> {
+    if args.len() == 1 {
+        match args[0].as_str() {
+            "-h" | "--help" => return Ok(format!("{USAGE_TEXT}\n")),
+            "-V" | "--version" => return Ok(format!("deadbolt {}\n", env!("CARGO_PKG_VERSION"))),
+            _ => {}
+        }
+    }
     if args.len() < 3 || args[0] != "--state" {
-        return Err(caller(
-            "usage, deadbolt --state PATH with an optional --route keychain or passphrase and then one of enroll, retire, rotate, replace, grant, redeem, revoke, cutoff, audit",
-        ));
+        return Err(caller(USAGE_TEXT));
     }
     let state = PathBuf::from(&args[1]);
     let mut index = 2;
@@ -334,12 +352,13 @@ fn run(args: &[String]) -> Result<String, Error> {
         index += 2;
     }
     let command = args.get(index).map(String::as_str).ok_or_else(|| {
-        caller("the command is not one of enroll, retire, rotate, replace, grant, redeem, revoke, cutoff, audit")
+        caller("the command is not one of enroll, retire, rotate, replace, grant, redeem, revoke, cutoff, audit, status, rekey")
     })?;
     let rest = &args[index + 1..];
     let now = now_seconds()?;
     let backend = platform_backend();
-    let passphrase = CliPassphrase::from_environment();
+    let passphrase = CliPassphrase::from_env_var("DEADBOLT_PASSPHRASE", "passphrase: ");
+    let new_passphrase = CliPassphrase::from_env_var("DEADBOLT_NEW_PASSPHRASE", "new passphrase: ");
     let unlock = Unlock {
         route,
         custody: &*backend,
@@ -466,8 +485,34 @@ fn run(args: &[String]) -> Result<String, Error> {
             }
             Ok(out)
         }
+        "status" => {
+            let _options = Options::parse(rest, &[], &[])?;
+            let summary = deadbolt::status(&state, &unlock, now)?;
+            Ok(format!(
+                "{}\n",
+                serde_json::to_string(&summary).unwrap_or_default()
+            ))
+        }
+        "rekey" => {
+            let options = Options::parse(rest, &["--to-route"], &[])?;
+            let to_route_text = options.required("--to-route")?;
+            let to_route = match to_route_text.as_str() {
+                "keychain" => Route::Keychain,
+                "passphrase" => Route::Passphrase,
+                _ => return Err(caller("the target custody route is keychain or passphrase")),
+            };
+            let from_route = deadbolt::rekey(&state, &unlock, to_route, &new_passphrase, now)?;
+            Ok(format!(
+                "{}\n",
+                serde_json::json!({
+                    "rekeyed": true,
+                    "from_route": from_route.name(),
+                    "to_route": to_route.name(),
+                })
+            ))
+        }
         _ => Err(caller(
-            "the command is not one of enroll, retire, rotate, replace, grant, redeem, revoke, cutoff, audit",
+            "the command is not one of enroll, retire, rotate, replace, grant, redeem, revoke, cutoff, audit, status, rekey",
         )),
     }
 }
