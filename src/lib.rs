@@ -6,7 +6,7 @@
 //! key the custody module holds. Every change is published by atomic
 //! rename under one exclusive advisory lock, and the state file mode
 //! is gated on every open. The obligations this code answers to are
-//! DK-1 to DK-27 in CONTRACT.md.
+//! DK-1 to DK-28 in CONTRACT.md.
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -130,7 +130,8 @@ impl RedeemRefusal {
 /// later act re-decides it. An open follows the recorded route only,
 /// so a keychain store never opens by derivation and a passphrase
 /// store never opens by a keychain lookup.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Route {
     /// The unlock key stands in the operating system keychain.
     Keychain,
@@ -223,6 +224,58 @@ pub struct AuditEntry {
     pub action: Option<String>,
     pub run_id: Option<String>,
     pub outcome: String,
+}
+
+/// The standing status of a grant at the instant of a status read, DK-28.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GrantStatus {
+    Live,
+    Expired,
+    Revoked,
+}
+
+/// The non-secret summary of one enrolled credential, DK-28.
+///
+/// This record never carries a credential value, keeping DK-10 whole.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CredentialSummary {
+    pub name: String,
+    pub scopes: Vec<Scope>,
+    pub enrolled_at: i64,
+    pub incarnation: u64,
+}
+
+/// The non-secret summary of one recorded grant, DK-28.
+///
+/// This record never carries a grant token or a token hash, keeping
+/// DK-6 and DK-10 whole.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GrantSummary {
+    pub id: String,
+    pub credential: String,
+    pub resource: String,
+    pub action: String,
+    pub run_id: Option<String>,
+    pub granted_at: i64,
+    pub expires_at: i64,
+    pub ended_at: Option<i64>,
+    pub end_reason: Option<String>,
+    pub incarnation: u64,
+    pub status: GrantStatus,
+}
+
+/// The non-secret standing summary of a store, DK-28.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoreStatus {
+    pub route: Route,
+    pub store: String,
+    pub credentials: Vec<CredentialSummary>,
+    pub grants: Vec<GrantSummary>,
+    pub audit_entries: usize,
 }
 
 /// The incarnation a record written before the mark existed
@@ -752,10 +805,11 @@ fn open_document(sealed: &envelope::Sealed, key: &StoreKey) -> Result<State, Err
 ///
 /// The proof seals the loaded document, decrypts the rendering,
 /// strictly reads the result, and compares it against the loaded
-/// document field by field. Only a passing proof lets the caller
-/// publish, so a failed proof leaves the plaintext standing exactly
-/// as it stood.
-fn prove_adoption(state: &State, header: &Header, key: &StoreKey) -> Result<(), Error> {
+/// document field by field. Returning the exact rendered envelope
+/// string lets the caller publish the proved bytes directly, so a
+/// failed proof leaves the prior store standing untouched and a
+/// passing proof writes the exact envelope it verified.
+fn prove_adoption(state: &State, header: &Header, key: &StoreKey) -> Result<String, Error> {
     let rendered = seal_document(state, header, key)?;
     let sealed = envelope::parse_envelope(&rendered)?;
     let proven = open_document(&sealed, key)?;
@@ -764,7 +818,7 @@ fn prove_adoption(state: &State, header: &Header, key: &StoreKey) -> Result<(), 
             "the adopted envelope does not decrypt to the document it was sealed from".to_string(),
         ));
     }
-    Ok(())
+    Ok(rendered)
 }
 
 /// How the standing store is sealed, or that no store stands yet.
@@ -927,13 +981,16 @@ impl<'a> Session<'a> {
                     // that case. The removal is best effort,
                     // because the failure is the error the caller
                     // must see.
-                    if let Err(err) = prove_adoption(&state, &header, &key) {
-                        if route == Route::Keychain {
-                            let _ = unlock.custody.delete_key(&header.store);
+                    let proved = match prove_adoption(&state, &header, &key) {
+                        Ok(rendered) => rendered,
+                        Err(err) => {
+                            if route == Route::Keychain {
+                                let _ = unlock.custody.delete_key(&header.store);
+                            }
+                            return Err(err);
                         }
-                        return Err(err);
-                    }
-                    let mut session = Session {
+                    };
+                    let session = Session {
                         state_path: state_path.to_path_buf(),
                         state,
                         exists: true,
@@ -941,7 +998,7 @@ impl<'a> Session<'a> {
                         unlock,
                         _lock: lock,
                     };
-                    if let Err(err) = session.publish() {
+                    if let Err(err) = session.publish_rendered(&proved) {
                         if route == Route::Keychain {
                             let _ = unlock.custody.delete_key(&session.state.store_id);
                         }
@@ -1005,10 +1062,8 @@ impl<'a> Session<'a> {
         result
     }
 
-    /// Publish a document whose custody already stands: seal it
-    /// and rename it over the state file. publish above is the
-    /// only caller, and it owns custody establishment and the
-    /// cleanup a failed first publish owes.
+    /// Publish a document whose custody already stands by sealing it
+    /// and renaming it over the state file.
     fn publish_sealed(&mut self) -> Result<(), Error> {
         let (header, key) = match &self.sealing {
             Sealing::Sealed { header, key } => (header, key),
@@ -1019,6 +1074,12 @@ impl<'a> Session<'a> {
             }
         };
         let sealed_text = seal_document(&self.state, header, key)?;
+        self.publish_rendered(&sealed_text)
+    }
+
+    /// Atomically write an already rendered envelope string to a sibling
+    /// temporary file and rename it over the state path.
+    fn publish_rendered(&self, sealed_text: &str) -> Result<(), Error> {
         let directory = self
             .state_path
             .parent()
@@ -1706,4 +1767,149 @@ pub fn cutoff(state_path: &Path, unlock: &Unlock, run_id: &str, now: i64) -> Res
 pub fn audit(state_path: &Path, unlock: &Unlock, now: i64) -> Result<Vec<AuditEntry>, Error> {
     let session = Session::open(state_path, unlock, now)?;
     Ok(session.state.audit.clone())
+}
+
+/// Read the non-secret standing summary of a store, DK-28.
+///
+/// A missing store refuses without creating a state file, a standing
+/// plaintext store is adopted when a custody route is supplied, and
+/// an already sealed store is left byte for byte untouched on disk.
+pub fn status(state_path: &Path, unlock: &Unlock, now: i64) -> Result<StoreStatus, Error> {
+    check_instant(now)?;
+    let session = Session::open(state_path, unlock, now)?;
+    if !session.exists {
+        return Err(Error::Refusal(
+            "status refused, no store stands at that path".to_string(),
+        ));
+    }
+    let (route, store) = match &session.sealing {
+        Sealing::Sealed { header, .. } => (header.route, header.store.clone()),
+        Sealing::Uncreated { .. } => {
+            return Err(Error::Corrupt(
+                "the store stands unsealed after opening".to_string(),
+            ))
+        }
+    };
+    let credentials = session
+        .state
+        .credentials
+        .iter()
+        .map(|credential| CredentialSummary {
+            name: credential.name.clone(),
+            scopes: credential.scopes.clone(),
+            enrolled_at: credential.enrolled_at,
+            incarnation: credential.incarnation,
+        })
+        .collect();
+    let grants = session
+        .state
+        .grants
+        .iter()
+        .map(|grant| {
+            let grant_status = if grant.ended_at.is_some() {
+                GrantStatus::Revoked
+            } else if now >= grant.expires_at {
+                GrantStatus::Expired
+            } else {
+                GrantStatus::Live
+            };
+            GrantSummary {
+                id: grant.id.clone(),
+                credential: grant.credential.clone(),
+                resource: grant.resource.clone(),
+                action: grant.action.clone(),
+                run_id: grant.run_id.clone(),
+                granted_at: grant.granted_at,
+                expires_at: grant.expires_at,
+                ended_at: grant.ended_at,
+                end_reason: grant.end_reason.clone(),
+                incarnation: grant.incarnation,
+                status: grant_status,
+            }
+        })
+        .collect();
+    Ok(StoreStatus {
+        route,
+        store,
+        credentials,
+        grants,
+        audit_entries: session.state.audit.len(),
+    })
+}
+
+/// Rekey a standing sealed store onto a fresh key or custody route, DK-28.
+///
+/// The act opens the sealed store under its current custody, establishes
+/// fresh target custody, appends one rekey audit entry, proves the new
+/// envelope in memory, and publishes atomically by rename, cleaning up
+/// any newly stored keychain entry on failure and removing the prior
+/// keychain entry on a best-effort basis after rename when leaving a
+/// keychain store. Returns the route the store previously stood on.
+pub fn rekey(
+    state_path: &Path,
+    current: &Unlock,
+    to_route: Route,
+    target_passphrase: &dyn PassphraseSource,
+    now: i64,
+) -> Result<Route, Error> {
+    check_instant(now)?;
+    if current.route.is_some() {
+        return Err(Error::Caller(
+            "the custody route stands beside a store that already stands".to_string(),
+        ));
+    }
+    let mut session = Session::open(state_path, current, now)?;
+    if !session.exists {
+        return Err(Error::Refusal(
+            "rekey refused, no store stands at that path".to_string(),
+        ));
+    }
+    let state_is_symlink = std::fs::symlink_metadata(state_path)
+        .map(|meta| meta.file_type().is_symlink())
+        .unwrap_or(false);
+    let (old_route, old_store_id) = match &session.sealing {
+        Sealing::Sealed { header, .. } => (header.route, header.store.clone()),
+        Sealing::Uncreated { .. } => {
+            return Err(Error::Corrupt(
+                "the store stands unsealed after opening".to_string(),
+            ))
+        }
+    };
+    let target_unlock = Unlock {
+        route: Some(to_route),
+        custody: current.custody,
+        passphrase: target_passphrase,
+    };
+    let (new_header, new_key) = establish_custody(to_route, &target_unlock, &mut session.state)?;
+    session.state.record(
+        now,
+        "rekey",
+        None,
+        None,
+        None,
+        format!("rekeyed, {} to {}", old_route.name(), to_route.name()),
+    );
+    let proved = match prove_adoption(&session.state, &new_header, &new_key) {
+        Ok(rendered) => rendered,
+        Err(err) => {
+            if to_route == Route::Keychain {
+                let _ = current.custody.delete_key(&new_header.store);
+            }
+            return Err(err);
+        }
+    };
+    session.sealing = Sealing::Sealed {
+        header: new_header.clone(),
+        key: new_key,
+    };
+    if let Err(err) = session.publish_rendered(&proved) {
+        if to_route == Route::Keychain {
+            let _ = current.custody.delete_key(&new_header.store);
+        }
+        return Err(err);
+    }
+    if old_route == Route::Keychain && !state_is_symlink {
+        let _ = current.custody.delete_key(&old_store_id);
+    }
+    Ok(old_route)
 }
