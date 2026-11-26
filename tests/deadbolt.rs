@@ -700,6 +700,7 @@ fn permission_gate_refuses_every_operation_and_recovers() {
     );
 }
 
+// Portability adaptation gates POSIX 0600 mode creation pins to Unix.
 #[cfg(unix)]
 #[test]
 fn state_file_is_created_owner_only_and_stays_so() {
@@ -712,6 +713,7 @@ fn state_file_is_created_owner_only_and_stays_so() {
     assert_eq!(mode_of(&state), 0o600);
 }
 
+// Portability adaptation gates unlink-while-open inode race pin to Unix.
 #[cfg(unix)]
 #[test]
 fn lock_acquisition_recovers_when_an_unlinked_lock_is_held() {
@@ -3395,4 +3397,1441 @@ fn replace_retire_and_enroll_again_leaves_the_store_readable() {
         deadbolt::redeem(&state, &h.open(), &fresh.token, &read_scope(), T0 + 71).unwrap(),
         VALUE_D
     );
+}
+
+// Consolidated audit round submodules. Each former standalone tests/audit_*.rs
+// file stands verbatim inside its own isolated module namespace so Cargo builds
+// four integration test binaries instead of twenty while keeping every closed
+// round's harness, assertions, and historical file-path comments intact.
+
+mod audit_r3_dka8 {
+    //! Audit Round 3 pin for finding DK-A8: the Debug rendering of a
+    //! grant receipt never prints the token it carries, in the same
+    //! discipline the suite pins for the store key in
+    //! tests/custody.rs. The rendering still shows the receipt's
+    //! shape, its grant id and its expiry instant, with the token
+    //! standing as the word redacted.
+    //!
+    //! Every fixture is synthetic and names itself as one. Custody
+    //! runs against the fixture backend, and no test here touches a
+    //! real keychain.
+
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use deadbolt::custody::FixtureCustody;
+    use deadbolt::{PassphraseSource, Route, Scope, Unlock, Zeroizing};
+
+    const VALUE: &str = "SYNTHETIC-TEST-VALUE-quiet-foxglove-7341";
+    const PASSPHRASE: &str = "SYNTHETIC-TEST-VALUE-copper-lantern-9911";
+    const T0: i64 = 1_700_000_000;
+
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    fn test_dir(tag: &str) -> PathBuf {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!(
+            "deadbolt-audit-r3-dka8-test-{}-{tag}-{n}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn read_scope() -> Scope {
+        Scope {
+            resource: "bucket".to_string(),
+            action: "read".to_string(),
+        }
+    }
+
+    /// A passphrase supply answering one fixed answer.
+    struct Supply;
+
+    impl PassphraseSource for Supply {
+        fn passphrase(&self) -> Option<Zeroizing<Vec<u8>>> {
+            Some(Zeroizing::new(PASSPHRASE.as_bytes().to_vec()))
+        }
+    }
+
+    #[test]
+    fn grant_receipt_debug_never_prints_the_token() {
+        let dir = test_dir("receipt-debug");
+        let custody = FixtureCustody::new();
+        let supply = Supply;
+        let state = dir.join("state.json");
+        let creating = Unlock {
+            route: Some(Route::Keychain),
+            custody: &custody,
+            passphrase: &supply,
+        };
+        deadbolt::enroll(&state, &creating, "cache-key", VALUE, &[read_scope()], T0).unwrap();
+        let opening = Unlock {
+            route: None,
+            custody: &custody,
+            passphrase: &supply,
+        };
+        let receipt =
+            deadbolt::grant(&state, &opening, "cache-key", &read_scope(), 600, None, T0).unwrap();
+        let rendered = format!("{receipt:?}");
+        assert!(
+            !rendered.contains(&receipt.token),
+            "the token stands in the Debug rendering: {rendered}"
+        );
+        assert!(
+            rendered.contains(&receipt.grant_id),
+            "the grant id stands in the Debug rendering: {rendered}"
+        );
+        assert!(
+            rendered.contains(&receipt.expires_at.to_string()),
+            "the expiry instant stands in the Debug rendering: {rendered}"
+        );
+        assert!(
+            rendered.contains("redacted"),
+            "the token stands as redacted in the Debug rendering: {rendered}"
+        );
+    }
+}
+
+mod audit_r3_dka9 {
+    //! Audit Round 3 pins for finding DK-A9: neither binary panics
+    //! on an argument that is not valid Unicode text. Each answers
+    //! through its standing one line error surface at the caller
+    //! error exit, the deadbolt command line with its error line at
+    //! exit 2 under DK-13 and the codepoint scanner with its scan
+    //! error line at exit 2, where the argument collection of the
+    //! standard library panicked and exited 101 before.
+    //!
+    //! Every fixture is synthetic. The staged argument is two bytes
+    //! that decode as no text at all, passed to each binary as an
+    //! operating system argument exactly as a shell would pass it.
+
+    use std::ffi::OsString;
+    use std::process::Command;
+
+    // Portability adaptation builds invalid UTF-8 bytes on Unix and an
+    // unpaired UTF-16 surrogate on Windows so both OS string forms are pinned.
+    #[cfg(unix)]
+    fn non_unicode_argument() -> OsString {
+        use std::os::unix::ffi::OsStringExt;
+        OsString::from_vec(b"\xff\xfe".to_vec())
+    }
+
+    #[cfg(windows)]
+    fn non_unicode_argument() -> OsString {
+        use std::os::windows::ffi::OsStringExt;
+        OsString::from_wide(&[0xD800])
+    }
+
+    #[test]
+    fn the_command_line_answers_a_non_unicode_argument_as_a_caller_error() {
+        let output = Command::new(env!("CARGO_BIN_EXE_deadbolt"))
+            .arg("--state")
+            .arg(non_unicode_argument())
+            .arg("audit")
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert!(stderr.starts_with("error: "), "{stderr}");
+        assert_eq!(stderr.lines().count(), 1, "{stderr}");
+        assert!(output.stdout.is_empty());
+    }
+
+    #[test]
+    fn the_scanner_answers_a_non_unicode_argument_as_a_scan_error() {
+        let output = Command::new(env!("CARGO_BIN_EXE_codepoint_scan"))
+            .arg(non_unicode_argument())
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert!(stderr.starts_with("scan error, "), "{stderr}");
+        assert_eq!(stderr.lines().count(), 1, "{stderr}");
+        assert!(output.stdout.is_empty());
+    }
+}
+
+mod audit_r5_dka23 {
+    //! Audit Round 5 pins for finding DK-A23: neither binary panics
+    //! when a write to its standing output fails. Each answers
+    //! through its standing one line error surface at the filesystem
+    //! exit, the deadbolt command line with its error line at exit 2
+    //! under DK-13 and the codepoint scanner with its scan error line
+    //! at exit 2, where print! and println! panicked and exited 101
+    //! before. A caller error whose own error line cannot be written
+    //! still exits 2, because the exit code is the last surface of
+    //! the taxonomy standing.
+    //!
+    //! Every fixture is synthetic and names itself as one. The full
+    //! stream prefers /dev/full where the host provides it and falls
+    //! back to a pipe whose reader is closed on hosts without /dev/full,
+    //! proving a failing write before handing the stream to the child
+    //! so these pins run across Linux, macOS, and Windows. Custody runs
+    //! on the passphrase route, and no test here touches a real keychain.
+
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, Stdio};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const PASSPHRASE: &str = "SYNTHETIC-TEST-VALUE-copper-lantern-9911";
+    const VALUE: &str = "SYNTHETIC-TEST-VALUE-quiet-foxglove-7341";
+
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    fn test_dir(tag: &str) -> PathBuf {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!(
+            "deadbolt-audit-r5-dka23-test-{}-{tag}-{n}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A writable handle whose writes always fail, using /dev/full when
+    /// present and falling back to a pipe with its reader closed.
+    fn full_stream() -> Stdio {
+        use std::io::Write;
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/full")
+        {
+            if file.write_all(b"probe").is_err() {
+                return Stdio::from(file);
+            }
+        }
+        // Portability adaptation retries pipe creation when a concurrent child
+        // spawn on macOS inherits reader before FIOCLEX closes the race window.
+        for _ in 0..64 {
+            let (reader, mut writer) = std::io::pipe().unwrap();
+            drop(reader);
+            if writer.write_all(b"probe").is_err() {
+                return Stdio::from(writer);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("writes to a closed pipe must fail")
+    }
+
+    struct CliOutput {
+        status: i32,
+        stdout: String,
+        stderr: String,
+    }
+
+    fn run_deadbolt(args: &[&str], stdout: Stdio, stderr: Stdio) -> CliOutput {
+        let output = Command::new(env!("CARGO_BIN_EXE_deadbolt"))
+            .args(args)
+            .env("DEADBOLT_PASSPHRASE", PASSPHRASE)
+            .stdout(stdout)
+            .stderr(stderr)
+            .output()
+            .unwrap();
+        CliOutput {
+            status: output.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        }
+    }
+
+    fn run_scanner(root: &Path) -> CliOutput {
+        let output = Command::new(env!("CARGO_BIN_EXE_codepoint_scan"))
+            .arg(root)
+            .stdout(full_stream())
+            .output()
+            .unwrap();
+        CliOutput {
+            status: output.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        }
+    }
+
+    fn run_scanner_with_surplus_on_full_stderr(root: &Path) -> CliOutput {
+        let output = Command::new(env!("CARGO_BIN_EXE_codepoint_scan"))
+            .arg(root)
+            .arg("second-root")
+            .stdout(Stdio::piped())
+            .stderr(full_stream())
+            .output()
+            .unwrap();
+        CliOutput {
+            status: output.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        }
+    }
+
+    #[test]
+    fn a_successful_act_whose_report_cannot_be_written_exits_2() {
+        let dir = test_dir("full-stdout");
+        let state = dir.join("state.json");
+        let state_arg = state.to_string_lossy().into_owned();
+        let value_path = dir.join("value.txt");
+        std::fs::write(&value_path, format!("{VALUE}\n")).unwrap();
+        let value_arg = value_path.to_string_lossy().into_owned();
+        let out = run_deadbolt(
+            &[
+                "--state",
+                &state_arg,
+                "--route",
+                "passphrase",
+                "enroll",
+                "--name",
+                "cache-key",
+                "--value-file",
+                &value_arg,
+                "--scope",
+                "bucket:read",
+            ],
+            full_stream(),
+            Stdio::piped(),
+        );
+        assert_eq!(out.status, 2, "{}", out.stderr);
+        assert!(
+            out.stderr
+                .starts_with("error: the output could not be written because "),
+            "{}",
+            out.stderr
+        );
+        assert_eq!(out.stderr.lines().count(), 1, "{}", out.stderr);
+        assert!(!out.stderr.contains("panicked"), "{}", out.stderr);
+        // The act itself succeeded and the store stands; only its
+        // report failed, and the audit read shows the enroll alone.
+        assert!(state.exists());
+        let audit = run_deadbolt(
+            &["--state", &state_arg, "audit"],
+            Stdio::piped(),
+            Stdio::piped(),
+        );
+        assert_eq!(audit.status, 0, "{}", audit.stderr);
+        assert_eq!(audit.stdout.lines().count(), 1, "{}", audit.stdout);
+        assert!(
+            audit.stdout.contains("\"kind\":\"enroll\""),
+            "{}",
+            audit.stdout
+        );
+    }
+
+    #[test]
+    fn a_caller_error_keeps_its_exit_when_standard_error_refuses() {
+        let dir = test_dir("full-stderr");
+        let state = dir.join("state.json");
+        let state_arg = state.to_string_lossy().into_owned();
+        // The grant names no --ttl, a caller error at exit 2. With
+        // standard error standing on /dev/full the error line cannot
+        // be written, and the exit code still stands at 2, where the
+        // panic on the error write exited 101 before the fix.
+        let out = run_deadbolt(
+            &[
+                "--state",
+                &state_arg,
+                "grant",
+                "--credential",
+                "cache-key",
+                "--scope",
+                "bucket:read",
+            ],
+            Stdio::piped(),
+            full_stream(),
+        );
+        assert_eq!(out.status, 2);
+        assert!(out.stdout.is_empty());
+    }
+
+    #[test]
+    fn the_scanner_answers_a_full_stdout_as_a_scan_error() {
+        let dir = test_dir("scanner-clean");
+        std::fs::write(dir.join("clean.md"), "clean").unwrap();
+        let out = run_scanner(&dir);
+        assert_eq!(out.status, 2, "{}", out.stderr);
+        assert!(
+            out.stderr
+                .starts_with("scan error, the report could not be written because "),
+            "{}",
+            out.stderr
+        );
+        assert_eq!(out.stderr.lines().count(), 1, "{}", out.stderr);
+        assert!(!out.stderr.contains("panicked"), "{}", out.stderr);
+    }
+
+    #[test]
+    fn the_scanner_answers_a_full_stdout_on_a_dash_hit_as_a_scan_error() {
+        let dir = test_dir("scanner-dash");
+        std::fs::write(dir.join("note.md"), "a\u{2014}b").unwrap();
+        let out = run_scanner(&dir);
+        assert_eq!(out.status, 2, "{}", out.stderr);
+        assert!(
+            out.stderr
+                .starts_with("scan error, the report could not be written because "),
+            "{}",
+            out.stderr
+        );
+        assert_eq!(out.stderr.lines().count(), 1, "{}", out.stderr);
+        assert!(!out.stderr.contains("panicked"), "{}", out.stderr);
+    }
+
+    #[test]
+    fn the_scanners_surplus_refusal_keeps_its_exit_when_standard_error_refuses() {
+        let dir = test_dir("scanner-surplus-full-stderr");
+        std::fs::write(dir.join("clean.md"), "clean").unwrap();
+        // The surplus argument refusal at exit 2. With standard error
+        // standing on /dev/full the refusal line cannot be written,
+        // and the exit code still stands at 2, where the bare print
+        // panicked on the failed write and exited 101 before the fix.
+        let out = run_scanner_with_surplus_on_full_stderr(&dir);
+        assert_eq!(out.status, 2);
+        assert!(out.stdout.is_empty());
+    }
+}
+
+mod audit_r5_dka25 {
+    //! Audit Round 5 pins for finding DK-A25: a time to live text
+    //! of digits alone whose value overflows the type draws the
+    //! range wording the library speaks for a value outside the
+    //! accepted range, not the not a whole number wording, which is
+    //! false for it. A lettered text keeps the standing wording, so
+    //! the split stands pinned at both sides.
+    //!
+    //! Every fixture is synthetic and names itself as one. Custody
+    //! runs on the passphrase route, and no test here touches a real
+    //! keychain.
+
+    use std::path::PathBuf;
+    use std::process::Command;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const PASSPHRASE: &str = "SYNTHETIC-TEST-VALUE-copper-lantern-9911";
+    const VALUE: &str = "SYNTHETIC-TEST-VALUE-quiet-foxglove-7341";
+    const RANGE_WORDING: &str = "error: the time to live must stand from 1 to 86400 seconds\n";
+    const WHOLE_WORDING: &str = "error: the time to live is not a whole number of seconds\n";
+
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    fn test_dir(tag: &str) -> PathBuf {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!(
+            "deadbolt-audit-r5-dka25-test-{}-{tag}-{n}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    struct CliOutput {
+        status: i32,
+        stdout: String,
+        stderr: String,
+    }
+
+    fn run_cli(args: &[&str]) -> CliOutput {
+        let output = Command::new(env!("CARGO_BIN_EXE_deadbolt"))
+            .args(args)
+            .env("DEADBOLT_PASSPHRASE", PASSPHRASE)
+            .output()
+            .unwrap();
+        CliOutput {
+            status: output.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        }
+    }
+
+    /// A standing passphrase store holding one enrolled credential,
+    /// answering its state path as a string beside the path itself.
+    fn standing_store(tag: &str) -> (PathBuf, String) {
+        let dir = test_dir(tag);
+        let state = dir.join("state.json");
+        let state_arg = state.to_string_lossy().into_owned();
+        let value_path = dir.join("value.txt");
+        std::fs::write(&value_path, format!("{VALUE}\n")).unwrap();
+        let value_arg = value_path.to_string_lossy().into_owned();
+        let out = run_cli(&[
+            "--state",
+            &state_arg,
+            "--route",
+            "passphrase",
+            "enroll",
+            "--name",
+            "cache-key",
+            "--value-file",
+            &value_arg,
+            "--scope",
+            "bucket:read",
+        ]);
+        assert_eq!(out.status, 0, "{}", out.stderr);
+        (state, state_arg)
+    }
+
+    #[test]
+    fn an_overflowing_time_to_live_draws_the_range_wording() {
+        let (_state, state_arg) = standing_store("overflow");
+        let out = run_cli(&[
+            "--state",
+            &state_arg,
+            "grant",
+            "--credential",
+            "cache-key",
+            "--scope",
+            "bucket:read",
+            "--ttl",
+            "99999999999999999999999999",
+        ]);
+        assert_eq!(out.status, 2, "{}", out.stderr);
+        assert_eq!(out.stderr, RANGE_WORDING);
+        // The refusal stands at the parse, before the act, so nothing
+        // is recorded: the audit read still shows the enroll alone.
+        let audit = run_cli(&["--state", &state_arg, "audit"]);
+        assert_eq!(audit.status, 0, "{}", audit.stderr);
+        assert_eq!(audit.stdout.lines().count(), 1, "{}", audit.stdout);
+    }
+
+    #[test]
+    fn a_lettered_time_to_live_keeps_the_whole_number_wording() {
+        let (_state, state_arg) = standing_store("lettered");
+        let out = run_cli(&[
+            "--state",
+            &state_arg,
+            "grant",
+            "--credential",
+            "cache-key",
+            "--scope",
+            "bucket:read",
+            "--ttl",
+            "12x",
+        ]);
+        assert_eq!(out.status, 2, "{}", out.stderr);
+        assert_eq!(out.stderr, WHOLE_WORDING);
+    }
+}
+
+mod audit_r9_dka10 {
+    //! Audit Round 9 pins for finding DK-A10: a valued option whose
+    //! value slot is taken by the name of an option the same command
+    //! offers refuses at parse time as a caller error, with the
+    //! standing wording for an option that stands with no value after
+    //! it, at exit 2, before the store opens. Before the repair the
+    //! swallowed name was taken as the value: in the redeem and
+    //! revoke shapes below it was looked up against the store and
+    //! drew a recorded refusal at exit 1, and in the grant shape it
+    //! failed the time to live parse under the wrong fault's wording.
+    //!
+    //! The fourth pin is a preservation pin. A value that merely
+    //! begins with hyphens and names no offered option still parses
+    //! as a value and meets its downstream check, exactly as before
+    //! the repair; it passes against the old code by design and
+    //! fails on the blanket form of the fix, which would refuse
+    //! every hyphen led value with the valueless wording.
+    //!
+    //! Every fixture is synthetic and names itself as one. Custody
+    //! runs on the passphrase route through the environment channel,
+    //! and no test here touches a real keychain.
+
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const VALUE_A: &str = "SYNTHETIC-TEST-VALUE-alpha-0001";
+    const CLI_PASSPHRASE: &str = "SYNTHETIC-TEST-VALUE-cli-passphrase";
+    const VALUELESS: &str = "error: an option that takes a value stands with no value after it\n";
+
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    fn test_dir(tag: &str) -> PathBuf {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!(
+            "deadbolt-audit-r9-dka10-test-{}-{tag}-{n}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    struct CliOutput {
+        status: i32,
+        stdout: String,
+        stderr: String,
+    }
+
+    fn run_cli_pp(args: &[&str]) -> CliOutput {
+        let output = Command::new(env!("CARGO_BIN_EXE_deadbolt"))
+            .args(args)
+            .env("DEADBOLT_PASSPHRASE", CLI_PASSPHRASE)
+            .output()
+            .unwrap();
+        CliOutput {
+            status: output.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        }
+    }
+
+    fn write_value_file(dir: &Path, value: &str) -> String {
+        let path = dir.join("value.txt");
+        std::fs::write(&path, format!("{value}\n")).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    /// Enroll one credential and grant once against it, and answer
+    /// the state path in its argument form.
+    fn enroll_and_grant(dir: &Path) -> String {
+        let state = dir.join("state.json");
+        let state_arg = state.to_string_lossy().into_owned();
+        let value_file = write_value_file(dir, VALUE_A);
+        let out = run_cli_pp(&[
+            "--state",
+            &state_arg,
+            "--route",
+            "passphrase",
+            "enroll",
+            "--name",
+            "cache-key",
+            "--value-file",
+            &value_file,
+            "--scope",
+            "bucket:read",
+        ]);
+        assert_eq!(out.status, 0, "{}", out.stderr);
+        let out = run_cli_pp(&[
+            "--state",
+            &state_arg,
+            "grant",
+            "--credential",
+            "cache-key",
+            "--scope",
+            "bucket:read",
+            "--ttl",
+            "600",
+        ]);
+        assert_eq!(out.status, 0, "{}", out.stderr);
+        state_arg
+    }
+
+    fn audit_line_count(state_arg: &str) -> usize {
+        let out = run_cli_pp(&["--state", state_arg, "audit"]);
+        assert_eq!(out.status, 0, "{}", out.stderr);
+        out.stdout.lines().count()
+    }
+
+    #[test]
+    fn a_redeem_whose_token_option_swallows_the_scope_name_refuses_as_a_caller_error_and_records_nothing(
+    ) {
+        let dir = test_dir("redeem-swallowed");
+        let state_arg = enroll_and_grant(&dir);
+        let before = audit_line_count(&state_arg);
+        let out = run_cli_pp(&[
+            "--state",
+            &state_arg,
+            "redeem",
+            "--scope",
+            "bucket:read",
+            "--token",
+            "--scope",
+        ]);
+        assert_eq!(out.status, 2, "{} {}", out.stdout, out.stderr);
+        assert_eq!(out.stderr, VALUELESS);
+        assert_eq!(audit_line_count(&state_arg), before);
+    }
+
+    #[test]
+    fn a_revoke_whose_grant_option_swallows_its_own_name_refuses_as_a_caller_error_and_records_nothing(
+    ) {
+        let dir = test_dir("revoke-swallowed");
+        let state_arg = enroll_and_grant(&dir);
+        let before = audit_line_count(&state_arg);
+        let out = run_cli_pp(&["--state", &state_arg, "revoke", "--grant", "--grant"]);
+        assert_eq!(out.status, 2, "{} {}", out.stdout, out.stderr);
+        assert_eq!(out.stderr, VALUELESS);
+        assert_eq!(audit_line_count(&state_arg), before);
+    }
+
+    #[test]
+    fn a_grant_whose_ttl_option_swallows_the_run_name_names_the_missing_value() {
+        let dir = test_dir("grant-swallowed");
+        let state_arg = enroll_and_grant(&dir);
+        let before = audit_line_count(&state_arg);
+        let out = run_cli_pp(&[
+            "--state",
+            &state_arg,
+            "grant",
+            "--credential",
+            "cache-key",
+            "--scope",
+            "bucket:read",
+            "--ttl",
+            "--run",
+        ]);
+        assert_eq!(out.status, 2, "{} {}", out.stdout, out.stderr);
+        assert_eq!(out.stderr, VALUELESS);
+        assert_eq!(audit_line_count(&state_arg), before);
+    }
+
+    #[test]
+    fn a_value_that_begins_with_hyphens_and_names_no_offered_option_still_parses_as_a_value() {
+        let dir = test_dir("hyphen-value");
+        let state = dir.join("state.json");
+        let state_arg = state.to_string_lossy().into_owned();
+        let value_file = write_value_file(&dir, VALUE_A);
+        let out = run_cli_pp(&[
+            "--state",
+            &state_arg,
+            "--route",
+            "passphrase",
+            "enroll",
+            "--name",
+            "--not-an-option",
+            "--value-file",
+            &value_file,
+            "--scope",
+            "bucket:read",
+        ]);
+        assert_eq!(out.status, 2, "{} {}", out.stdout, out.stderr);
+        assert!(out.stderr.starts_with("error: "), "{}", out.stderr);
+        assert_eq!(out.stderr.lines().count(), 1, "{}", out.stderr);
+        assert!(
+            !out.stderr.contains("stands with no value after it"),
+            "{}",
+            out.stderr
+        );
+        assert!(!state.exists());
+    }
+}
+
+mod audit_r9_dka35 {
+    //! Audit Round 9 pin for finding DK-A35: the library's Error
+    //! answers its carried filesystem error through the standard
+    //! error chain. Before the repair the Error implementation
+    //! carried no source override, so a caller walking source()
+    //! from an Io error arrived at None and the filesystem failure
+    //! that explained the refusal stayed sealed inside the variant.
+    //! The second half of the pin fences the repair's shape: the
+    //! variants whose payloads are text, and the redemption refusal
+    //! variant, answer no source, because nothing stands beneath
+    //! them to source.
+
+    use std::error::Error as _;
+
+    use deadbolt::{Error, RedeemRefusal};
+
+    #[test]
+    fn the_io_variant_answers_its_carried_error_as_its_source() {
+        let err: Error = std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "SYNTHETIC-TEST-VALUE-io-probe",
+        )
+        .into();
+        let source = err
+            .source()
+            .expect("the carried filesystem error stands in the chain");
+        let io = source
+            .downcast_ref::<std::io::Error>()
+            .expect("the source is the carried io error");
+        assert_eq!(io.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(
+            io.to_string()
+                .contains("the filesystem refused an operation"),
+            "{io}"
+        );
+    }
+
+    #[test]
+    fn the_text_and_refusal_variants_answer_no_source() {
+        for err in [
+            Error::Caller("probe".to_string()),
+            Error::Refusal("probe".to_string()),
+            Error::Corrupt("probe".to_string()),
+            Error::Permission("probe".to_string()),
+            Error::Redeem(RedeemRefusal::Expired),
+        ] {
+            assert!(err.source().is_none(), "{err}");
+        }
+    }
+}
+
+mod audit_r13_dka39 {
+    //! Audit Round 13 pins for finding DK-A39: the swallow check
+    //! DK-A10 landed consults the options the command itself offers,
+    //! and the two global options, --state and --route, stand in
+    //! every call but in no command's list, so a value slot taken by
+    //! one of them was still swallowed as a value. In the redeem and
+    //! revoke shapes below the swallowed name was looked up against
+    //! the store and drew a recorded refusal at exit 1, where DK-9
+    //! names a request shape that fails before the store opens as a
+    //! caller error that is never recorded. In the grant shape it
+    //! failed the time to live parse under the wrong fault's
+    //! wording, the number wording for an option that stands with
+    //! no value after it.
+    //!
+    //! The fourth pin is a preservation pin. A value that merely
+    //! begins with hyphens and names no offered option, global or
+    //! the command's own, still parses as a value and meets its
+    //! downstream check, exactly as before the repair; it passes
+    //! against the old code by design and fails on the blanket form
+    //! of the fix, which would refuse every hyphen led value with
+    //! the valueless wording.
+    //!
+    //! Every fixture is synthetic and names itself as one. Custody
+    //! runs on the passphrase route through the environment channel,
+    //! and no test here touches a real keychain.
+
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const VALUE_A: &str = "SYNTHETIC-TEST-VALUE-alpha-0001";
+    const CLI_PASSPHRASE: &str = "SYNTHETIC-TEST-VALUE-cli-passphrase";
+    const VALUELESS: &str = "error: an option that takes a value stands with no value after it\n";
+
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    fn test_dir(tag: &str) -> PathBuf {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!(
+            "deadbolt-audit-r13-dka39-test-{}-{tag}-{n}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    struct CliOutput {
+        status: i32,
+        stdout: String,
+        stderr: String,
+    }
+
+    fn run_cli_pp(args: &[&str]) -> CliOutput {
+        let output = Command::new(env!("CARGO_BIN_EXE_deadbolt"))
+            .args(args)
+            .env("DEADBOLT_PASSPHRASE", CLI_PASSPHRASE)
+            .output()
+            .unwrap();
+        CliOutput {
+            status: output.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        }
+    }
+
+    fn write_value_file(dir: &Path, value: &str) -> String {
+        let path = dir.join("value.txt");
+        std::fs::write(&path, format!("{value}\n")).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    /// Enroll one credential and grant once against it, and answer
+    /// the state path in its argument form.
+    fn enroll_and_grant(dir: &Path) -> String {
+        let state = dir.join("state.json");
+        let state_arg = state.to_string_lossy().into_owned();
+        let value_file = write_value_file(dir, VALUE_A);
+        let out = run_cli_pp(&[
+            "--state",
+            &state_arg,
+            "--route",
+            "passphrase",
+            "enroll",
+            "--name",
+            "cache-key",
+            "--value-file",
+            &value_file,
+            "--scope",
+            "bucket:read",
+        ]);
+        assert_eq!(out.status, 0, "{}", out.stderr);
+        let out = run_cli_pp(&[
+            "--state",
+            &state_arg,
+            "grant",
+            "--credential",
+            "cache-key",
+            "--scope",
+            "bucket:read",
+            "--ttl",
+            "600",
+        ]);
+        assert_eq!(out.status, 0, "{}", out.stderr);
+        state_arg
+    }
+
+    fn audit_line_count(state_arg: &str) -> usize {
+        let out = run_cli_pp(&["--state", state_arg, "audit"]);
+        assert_eq!(out.status, 0, "{}", out.stderr);
+        out.stdout.lines().count()
+    }
+
+    #[test]
+    fn a_redeem_whose_token_option_swallows_the_state_name_refuses_as_a_caller_error_and_records_nothing(
+    ) {
+        let dir = test_dir("redeem-swallowed-state");
+        let state_arg = enroll_and_grant(&dir);
+        let before = audit_line_count(&state_arg);
+        let out = run_cli_pp(&[
+            "--state",
+            &state_arg,
+            "redeem",
+            "--token",
+            "--state",
+            "--scope",
+            "bucket:read",
+        ]);
+        assert_eq!(out.status, 2, "{} {}", out.stdout, out.stderr);
+        assert_eq!(out.stderr, VALUELESS);
+        assert_eq!(audit_line_count(&state_arg), before);
+    }
+
+    #[test]
+    fn a_revoke_whose_grant_option_swallows_the_route_name_refuses_as_a_caller_error_and_records_nothing(
+    ) {
+        let dir = test_dir("revoke-swallowed-route");
+        let state_arg = enroll_and_grant(&dir);
+        let before = audit_line_count(&state_arg);
+        let out = run_cli_pp(&["--state", &state_arg, "revoke", "--grant", "--route"]);
+        assert_eq!(out.status, 2, "{} {}", out.stdout, out.stderr);
+        assert_eq!(out.stderr, VALUELESS);
+        assert_eq!(audit_line_count(&state_arg), before);
+    }
+
+    #[test]
+    fn a_grant_whose_ttl_option_swallows_the_state_name_names_the_missing_value() {
+        let dir = test_dir("grant-swallowed-state");
+        let state_arg = enroll_and_grant(&dir);
+        let before = audit_line_count(&state_arg);
+        let out = run_cli_pp(&[
+            "--state",
+            &state_arg,
+            "grant",
+            "--credential",
+            "cache-key",
+            "--scope",
+            "bucket:read",
+            "--ttl",
+            "--state",
+        ]);
+        assert_eq!(out.status, 2, "{} {}", out.stdout, out.stderr);
+        assert_eq!(out.stderr, VALUELESS);
+        assert_eq!(audit_line_count(&state_arg), before);
+    }
+
+    #[test]
+    fn a_value_that_begins_with_hyphens_and_names_no_offered_option_still_parses_as_a_value() {
+        let dir = test_dir("hyphen-value");
+        let state = dir.join("state.json");
+        let state_arg = state.to_string_lossy().into_owned();
+        let value_file = write_value_file(&dir, VALUE_A);
+        let out = run_cli_pp(&[
+            "--state",
+            &state_arg,
+            "--route",
+            "passphrase",
+            "enroll",
+            "--name",
+            "--not-an-option",
+            "--value-file",
+            &value_file,
+            "--scope",
+            "bucket:read",
+        ]);
+        assert_eq!(out.status, 2, "{} {}", out.stdout, out.stderr);
+        assert!(out.stderr.starts_with("error: "), "{}", out.stderr);
+        assert_eq!(out.stderr.lines().count(), 1, "{}", out.stderr);
+        assert!(
+            !out.stderr.contains("stands with no value after it"),
+            "{}",
+            out.stderr
+        );
+        assert!(!state.exists());
+    }
+}
+
+mod audit_r41_dka49 {
+    //! Audit Round 41 pins for finding DK-A49: a refusal recorded
+    //! against a standing state whose recording publish fails answers
+    //! the filesystem error in the refusal's place, never the refusal
+    //! itself. record_refusal appends the refusal entry to the loaded
+    //! document and publishes with the error propagated, which is
+    //! DK-9's discipline that the recording and the publication cannot
+    //! drift apart: a caller told of a refusal is told of one that
+    //! stands recorded, and where nothing could be published the
+    //! caller meets the failure that prevented the recording.
+    //!
+    //! These are preservation pins in the form DK-A44 and DK-A48 set.
+    //! Each passes against the standing code by design and fails on
+    //! the plausible wrong forms of the branch: record_refusal
+    //! swallowing its publish error, by a let underscore or an ok
+    //! conversion at that one call, which would let every act answer
+    //! its refusal as though recorded while nothing was published,
+    //! and an act returning its refusal ahead of the recording, which
+    //! would lie in the same direction. The control pin below stands
+    //! unarmed beside the two armed pins, so the contrast itself
+    //! proves the sabotage is what the armed pins judge.
+    //!
+    //! The failure is forced by a custody double over the fixture
+    //! backend, in the pattern of tests/audit_r2_dka2.rs, whose load
+    //! replaces the state file with a non-empty directory after the
+    //! key is loaded, so the open completes on the text already read
+    //! and the recording publish's rename cannot land. Every fixture
+    //! is synthetic and names itself as one. No test here touches a
+    //! real keychain.
+
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    use deadbolt::custody::{CustodyError, CustodyLoad, FixtureCustody, KeyCustody, StoreKey};
+    use deadbolt::{Error, PassphraseSource, Route, Scope, Unlock, Zeroizing};
+
+    const VALUE: &str = "SYNTHETIC-TEST-VALUE-quiet-foxglove-7341";
+    const PASSPHRASE: &str = "SYNTHETIC-TEST-VALUE-copper-lantern-9911";
+    const T0: i64 = 1_700_000_000;
+
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    fn test_dir(tag: &str) -> PathBuf {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!(
+            "deadbolt-audit-r41-dka49-test-{}-{tag}-{n}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn read_scope() -> Scope {
+        Scope {
+            resource: "bucket".to_string(),
+            action: "read".to_string(),
+        }
+    }
+
+    /// A passphrase supply answering one fixed answer. The stores
+    /// below stand on the keychain route, so the supply is never
+    /// consulted; it stands because an unlock context names one.
+    struct Supply;
+
+    impl PassphraseSource for Supply {
+        fn passphrase(&self) -> Option<Zeroizing<Vec<u8>>> {
+            Some(Zeroizing::new(PASSPHRASE.as_bytes().to_vec()))
+        }
+    }
+
+    /// A custody double over the fixture backend. Stores and deletes
+    /// pass through to the fixture, so a store enrolls for real. Once
+    /// armed, a load answers the fixture's key and then replaces the
+    /// state file with a non-empty directory, so the publish that
+    /// follows the open, the recording publish of a refusal among
+    /// them, meets a rename target it cannot land on.
+    struct SabotageOnLoadCustody {
+        inner: FixtureCustody,
+        dir: PathBuf,
+        armed: Mutex<bool>,
+    }
+
+    impl SabotageOnLoadCustody {
+        fn new(dir: PathBuf) -> Self {
+            SabotageOnLoadCustody {
+                inner: FixtureCustody::new(),
+                dir,
+                armed: Mutex::new(false),
+            }
+        }
+
+        fn arm(&self) {
+            *self.armed.lock().unwrap() = true;
+        }
+    }
+
+    impl KeyCustody for SabotageOnLoadCustody {
+        fn store_key(&self, store_id: &str, key: &StoreKey) -> Result<(), CustodyError> {
+            self.inner.store_key(store_id, key)
+        }
+
+        fn load_key(&self, store_id: &str) -> CustodyLoad {
+            let loaded = self.inner.load_key(store_id);
+            if *self.armed.lock().unwrap() {
+                let state = self.dir.join("state.json");
+                let _ = std::fs::remove_file(&state);
+                let _ = std::fs::create_dir_all(state.join("blocker"));
+            }
+            loaded
+        }
+
+        fn delete_key(&self, store_id: &str) -> Result<(), CustodyError> {
+            self.inner.delete_key(store_id)
+        }
+    }
+
+    fn keychain_store(custody: &SabotageOnLoadCustody, dir: &Path) -> PathBuf {
+        let state = dir.join("state.json");
+        let supply = Supply;
+        let creating = Unlock {
+            route: Some(Route::Keychain),
+            custody,
+            passphrase: &supply,
+        };
+        deadbolt::enroll(&state, &creating, "cache-key", VALUE, &[read_scope()], T0).unwrap();
+        state
+    }
+
+    fn open(custody: &SabotageOnLoadCustody) -> Unlock<'_> {
+        Unlock {
+            route: None,
+            custody,
+            passphrase: &Supply,
+        }
+    }
+
+    fn dir_entries(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn an_unarmed_refusal_answers_in_its_words_and_stands_recorded() {
+        let dir = test_dir("control");
+        let custody = SabotageOnLoadCustody::new(dir.clone());
+        let state = keychain_store(&custody, &dir);
+        let err = deadbolt::grant(
+            &state,
+            &open(&custody),
+            "ghost",
+            &read_scope(),
+            60,
+            None,
+            T0,
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::Refusal(_)), "{err}");
+        assert_eq!(
+            format!("{err}"),
+            "grant refused, no credential named ghost stands"
+        );
+        let entries = deadbolt::audit(&state, &open(&custody), T0).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[1].kind, "grant");
+        assert_eq!(entries[1].outcome, "refused, unknown credential");
+    }
+
+    #[test]
+    fn a_grant_refusal_whose_recording_publish_fails_answers_the_filesystem_error() {
+        let dir = test_dir("grant-armed");
+        let custody = SabotageOnLoadCustody::new(dir.clone());
+        let state = keychain_store(&custody, &dir);
+        custody.arm();
+        let err = deadbolt::grant(
+            &state,
+            &open(&custody),
+            "ghost",
+            &read_scope(),
+            60,
+            None,
+            T0,
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::Io(_)), "{err}");
+        assert!(!matches!(err, Error::Refusal(_)), "{err}");
+        // The failed publish left no sealed temporary copy standing,
+        // the cleanup DK-A4 landed holding on this path as on its own.
+        let entries = dir_entries(&dir);
+        assert!(
+            entries.iter().all(|name| !name.contains(".tmp-")),
+            "a sealed temp copy stands in {entries:?}"
+        );
+        assert_eq!(entries, ["state.json", "state.json.lock"]);
+    }
+
+    #[test]
+    fn a_redeem_refusal_whose_recording_publish_fails_answers_the_filesystem_error() {
+        let dir = test_dir("redeem-armed");
+        let custody = SabotageOnLoadCustody::new(dir.clone());
+        let state = keychain_store(&custody, &dir);
+        custody.arm();
+        let err = deadbolt::redeem(&state, &open(&custody), &"0".repeat(64), &read_scope(), T0)
+            .unwrap_err();
+        assert!(matches!(err, Error::Io(_)), "{err}");
+        assert!(!matches!(err, Error::Redeem(_)), "{err}");
+        let entries = dir_entries(&dir);
+        assert!(
+            entries.iter().all(|name| !name.contains(".tmp-")),
+            "a sealed temp copy stands in {entries:?}"
+        );
+        assert_eq!(entries, ["state.json", "state.json.lock"]);
+    }
+}
+
+mod audit_r48_dka50 {
+    //! Audit Round 48 finding DK-A50: redeem's incarnation fallback
+    //! stands pinned.
+    //!
+    //! Redeem judges a grant against the instant it is presented at,
+    //! while the reader judges a grant's liveness against the document
+    //! floor, the latest audit instant, and checks name and incarnation
+    //! only for grants live at the floor. A grant that stands dead at
+    //! the floor by expiry, unended, passes the reader whole even when
+    //! the credential it names has since stepped to a new incarnation
+    //! under a replace past its expiry, or been removed by a retire
+    //! past its expiry. A redeem of that grant's token at an instant
+    //! inside its own window passes the refusal order of DK-7 whole,
+    //! unended, unexpired at the presented instant, and at its granted
+    //! scope, and reaches the fallback, which looks the credential up
+    //! by name and incarnation together and answers Corrupt, a live
+    //! grant names a credential that does not stand, recording nothing
+    //! and publishing nothing, as DK-9 requires of an act refused by
+    //! corruption.
+    //!
+    //! The pins below stage that split with honest acts alone, and
+    //! each one fails on a plausible wrong form of what it pins. A
+    //! lookup by name alone answers the replacement's value to the old
+    //! token in the stepped arm. A fallback answering a DK-7 refusal
+    //! or the Refusal class in place of Corrupt fails the class and
+    //! wording assertions. A reader that refuses the document at open
+    //! answers in the reader's own words, a live grant in the state
+    //! file names a credential that does not stand, and the exact
+    //! wording assertion discriminates the two seats.
+    //!
+    //! Every fixture is synthetic and names itself as one. Credential
+    //! shaped strings carry the SYNTHETIC-TEST-VALUE marker so no
+    //! fixture can be mistaken for a real key.
+
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use deadbolt::custody::FixtureCustody;
+    use deadbolt::{Error, PassphraseSource, Route, Scope, Unlock, Zeroizing};
+
+    const VALUE_A: &str = "SYNTHETIC-TEST-VALUE-alpha-0001";
+    const VALUE_B: &str = "SYNTHETIC-TEST-VALUE-beta-0002";
+    const STORE_PASSPHRASE: &str = "SYNTHETIC-TEST-VALUE-store-passphrase";
+    const T0: i64 = 1_700_000_000;
+
+    const FALLBACK_WORDING: &str = "a live grant names a credential that does not stand";
+
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    fn test_dir(tag: &str) -> PathBuf {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!(
+            "deadbolt-audit-r48-{}-{tag}-{n}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn read_scope() -> Scope {
+        Scope {
+            resource: "bucket".to_string(),
+            action: "read".to_string(),
+        }
+    }
+
+    /// A passphrase supply that always answers the store passphrase.
+    struct Supply(Option<&'static [u8]>);
+
+    impl PassphraseSource for Supply {
+        fn passphrase(&self) -> Option<Zeroizing<Vec<u8>>> {
+            self.0.map(|bytes| Zeroizing::new(bytes.to_vec()))
+        }
+    }
+
+    /// The per test custody context, one fixture backend standing
+    /// behind every call a test makes, as in tests/audit_r41_dka49.rs.
+    struct Ctx {
+        custody: FixtureCustody,
+        supply: Supply,
+    }
+
+    impl Ctx {
+        fn new() -> Ctx {
+            Ctx {
+                custody: FixtureCustody::new(),
+                supply: Supply(Some(STORE_PASSPHRASE.as_bytes())),
+            }
+        }
+
+        fn open(&self) -> Unlock<'_> {
+            Unlock {
+                route: None,
+                custody: &self.custody,
+                passphrase: &self.supply,
+            }
+        }
+
+        fn creating(&self) -> Unlock<'_> {
+            Unlock {
+                route: Some(Route::Keychain),
+                custody: &self.custody,
+                passphrase: &self.supply,
+            }
+        }
+    }
+
+    fn enroll_a(ctx: &Ctx, state: &Path) {
+        deadbolt::enroll(
+            state,
+            &ctx.creating(),
+            "cache-key",
+            VALUE_A,
+            &[read_scope()],
+            T0,
+        )
+        .unwrap();
+    }
+
+    fn audit_kinds(ctx: &Ctx, state: &Path) -> Vec<String> {
+        deadbolt::audit(state, &ctx.open(), T0)
+            .unwrap()
+            .iter()
+            .map(|entry| entry.kind.clone())
+            .collect()
+    }
+
+    /// The control. The same staging redeems the standing value inside
+    /// the window, and a token granted after the replace redeems the
+    /// new value at the stepped incarnation, so the Corrupt answers in
+    /// the arms below are the fallback and nothing else in the staging.
+    #[test]
+    fn redeem_answers_inside_the_window_and_the_new_value_after_a_replace() {
+        let dir = test_dir("control");
+        let ctx = Ctx::new();
+        let state = dir.join("state.json");
+        enroll_a(&ctx, &state);
+        let receipt = deadbolt::grant(
+            &state,
+            &ctx.open(),
+            "cache-key",
+            &read_scope(),
+            100,
+            None,
+            T0,
+        )
+        .unwrap();
+        assert_eq!(receipt.expires_at, T0 + 100);
+        assert_eq!(
+            deadbolt::redeem(&state, &ctx.open(), &receipt.token, &read_scope(), T0 + 50).unwrap(),
+            VALUE_A
+        );
+        let (ended, stood_up) = deadbolt::replace(
+            &state,
+            &ctx.open(),
+            "cache-key",
+            VALUE_B,
+            &[read_scope()],
+            T0 + 120,
+        )
+        .unwrap();
+        assert_eq!(ended, 0);
+        assert_eq!(stood_up, 2);
+        let fresh = deadbolt::grant(
+            &state,
+            &ctx.open(),
+            "cache-key",
+            &read_scope(),
+            600,
+            None,
+            T0 + 130,
+        )
+        .unwrap();
+        assert_eq!(
+            deadbolt::redeem(&state, &ctx.open(), &fresh.token, &read_scope(), T0 + 131).unwrap(),
+            VALUE_B
+        );
+    }
+
+    /// The stepped arm. The replace past the grant's expiry ends
+    /// nothing, because the grant already stands dead at that instant,
+    /// and steps the credential to incarnation 2. The old token,
+    /// redeemed at an instant inside its own window, answers Corrupt
+    /// in the fallback's exact words, and the failed redeem records
+    /// nothing and publishes nothing.
+    #[test]
+    fn a_stepped_incarnation_answers_corrupt_to_a_token_minted_under_the_earlier_one() {
+        let dir = test_dir("stepped");
+        let ctx = Ctx::new();
+        let state = dir.join("state.json");
+        enroll_a(&ctx, &state);
+        let receipt = deadbolt::grant(
+            &state,
+            &ctx.open(),
+            "cache-key",
+            &read_scope(),
+            100,
+            None,
+            T0,
+        )
+        .unwrap();
+        let (ended, stood_up) = deadbolt::replace(
+            &state,
+            &ctx.open(),
+            "cache-key",
+            VALUE_B,
+            &[read_scope()],
+            T0 + 120,
+        )
+        .unwrap();
+        assert_eq!(ended, 0);
+        assert_eq!(stood_up, 2);
+        let before = std::fs::read(&state).unwrap();
+        let err = deadbolt::redeem(&state, &ctx.open(), &receipt.token, &read_scope(), T0 + 50)
+            .unwrap_err();
+        assert!(matches!(err, Error::Corrupt(_)), "{err}");
+        assert_eq!(err.to_string(), FALLBACK_WORDING);
+        assert_eq!(std::fs::read(&state).unwrap(), before);
+        assert_eq!(audit_kinds(&ctx, &state), ["enroll", "grant", "replace"]);
+    }
+
+    /// The removed arm. The retire past the grant's expiry ends
+    /// nothing and removes the credential the grant names. The same
+    /// travelling redeem answers the same Corrupt in the same words,
+    /// with the file unchanged and the trail standing at the three
+    /// acts that staged it.
+    #[test]
+    fn a_removed_credential_answers_corrupt_to_a_token_minted_against_it() {
+        let dir = test_dir("removed");
+        let ctx = Ctx::new();
+        let state = dir.join("state.json");
+        enroll_a(&ctx, &state);
+        let receipt = deadbolt::grant(
+            &state,
+            &ctx.open(),
+            "cache-key",
+            &read_scope(),
+            100,
+            None,
+            T0,
+        )
+        .unwrap();
+        let ended = deadbolt::retire(&state, &ctx.open(), "cache-key", T0 + 120).unwrap();
+        assert_eq!(ended, 0);
+        let before = std::fs::read(&state).unwrap();
+        let err = deadbolt::redeem(&state, &ctx.open(), &receipt.token, &read_scope(), T0 + 50)
+            .unwrap_err();
+        assert!(matches!(err, Error::Corrupt(_)), "{err}");
+        assert_eq!(err.to_string(), FALLBACK_WORDING);
+        assert_eq!(std::fs::read(&state).unwrap(), before);
+        assert_eq!(audit_kinds(&ctx, &state), ["enroll", "grant", "retire"]);
+    }
 }
