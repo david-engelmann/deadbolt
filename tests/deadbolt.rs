@@ -4835,3 +4835,1170 @@ mod audit_r48_dka50 {
         assert_eq!(audit_kinds(&ctx, &state), ["enroll", "grant", "retire"]);
     }
 }
+
+mod dk28_status_rekey_and_cli {
+    use std::path::PathBuf;
+    use std::process::{Command, Stdio};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use sha2::{Digest, Sha256};
+
+    use super::{
+        common, document_json, enroll_a, read_scope, scope, set_mode, state_text, test_dir,
+        Harness, CLI_PASSPHRASE, STORE_PASSPHRASE, T0, VALUE_A, VALUE_B, VALUE_C,
+    };
+    use deadbolt::custody::{
+        derive_key, CustodyError, CustodyLoad, FixtureCustody, KeyCustody, StoreKey,
+    };
+    use deadbolt::{
+        CredentialSummary, Error, GrantStatus, GrantSummary, PassphraseSource, Route, StoreStatus,
+        Unlock, Zeroizing,
+    };
+
+    const NEW_PASS_1: &str = "SYNTHETIC-TEST-VALUE-new-passphrase-1";
+    const NEW_PASS_2: &str = "SYNTHETIC-TEST-VALUE-new-passphrase-2";
+
+    struct StaticPass<'a>(&'a [u8]);
+
+    impl<'a> PassphraseSource for StaticPass<'a> {
+        fn passphrase(&self) -> Option<Zeroizing<Vec<u8>>> {
+            Some(Zeroizing::new(self.0.to_vec()))
+        }
+    }
+
+    struct AbsentPass;
+
+    impl PassphraseSource for AbsentPass {
+        fn passphrase(&self) -> Option<Zeroizing<Vec<u8>>> {
+            None
+        }
+    }
+
+    struct PanickingPass;
+
+    impl PassphraseSource for PanickingPass {
+        fn passphrase(&self) -> Option<Zeroizing<Vec<u8>>> {
+            panic!("target passphrase source must never be consulted for keychain route");
+        }
+    }
+
+    struct FailingDeleteCustody<'a> {
+        inner: &'a FixtureCustody,
+    }
+
+    impl<'a> KeyCustody for FailingDeleteCustody<'a> {
+        fn store_key(&self, store_id: &str, key: &StoreKey) -> Result<(), CustodyError> {
+            self.inner.store_key(store_id, key)
+        }
+
+        fn load_key(&self, store_id: &str) -> CustodyLoad {
+            self.inner.load_key(store_id)
+        }
+
+        fn delete_key(&self, _store_id: &str) -> Result<(), CustodyError> {
+            Err(CustodyError::new("simulated delete failure"))
+        }
+    }
+
+    struct FailingStoreCustody<'a> {
+        inner: &'a FixtureCustody,
+        fail_store: AtomicBool,
+    }
+
+    impl<'a> KeyCustody for FailingStoreCustody<'a> {
+        fn store_key(&self, store_id: &str, key: &StoreKey) -> Result<(), CustodyError> {
+            if self.fail_store.load(Ordering::SeqCst) {
+                return Err(CustodyError::new("simulated store failure"));
+            }
+            self.inner.store_key(store_id, key)
+        }
+
+        fn load_key(&self, store_id: &str) -> CustodyLoad {
+            self.inner.load_key(store_id)
+        }
+
+        fn delete_key(&self, store_id: &str) -> Result<(), CustodyError> {
+            self.inner.delete_key(store_id)
+        }
+    }
+
+    fn sha256_hex(text: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(text.as_bytes());
+        common::hex(&hasher.finalize())
+    }
+
+    fn decrypt_passphrase_json(state: &PathBuf, passphrase: &[u8]) -> serde_json::Value {
+        let raw = state_text(state);
+        let envelope: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let salt = common::hex_bytes(envelope["header"]["kdf"]["salt"].as_str().unwrap());
+        let salt: [u8; 16] = salt.try_into().unwrap();
+        let key = derive_key(passphrase, &salt).unwrap();
+        serde_json::from_str(&common::decrypt_document(&raw, &key)).unwrap()
+    }
+
+    fn closed_stdout_stdio() -> Stdio {
+        #[cfg(unix)]
+        {
+            if let Ok(mut file) = std::fs::OpenOptions::new().write(true).open("/dev/full") {
+                use std::io::Write;
+                if file.write_all(b"probe").is_err() {
+                    return Stdio::from(file);
+                }
+            }
+        }
+        for _ in 0..64 {
+            let (reader, mut writer) = std::io::pipe().unwrap();
+            drop(reader);
+            use std::io::Write;
+            if writer.write_all(b"probe").is_err() {
+                return Stdio::from(writer);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("closed pipe must refuse writes");
+    }
+
+    #[test]
+    fn dk28_status_reports_non_secret_summaries_across_grant_states_and_never_leaks_secrets() {
+        let h = Harness::new();
+        let dir = test_dir("dk28-status");
+        let missing = dir.join("missing.json");
+
+        // Instant validation runs before opening the store.
+        let bad_now = deadbolt::status(&missing, &h.open(), -1).unwrap_err();
+        assert!(matches!(bad_now, Error::Caller(_)), "{bad_now}");
+        assert!(!missing.exists());
+        assert!(!dir.join("missing.json.lock").exists());
+
+        // Missing store refuses without creating a state file.
+        let absent = deadbolt::status(&missing, &h.open(), T0).unwrap_err();
+        assert!(matches!(absent, Error::Refusal(_)), "{absent}");
+        assert_eq!(
+            absent.to_string(),
+            "status refused, no store stands at that path"
+        );
+        assert!(!missing.exists());
+
+        // Plaintext store adopts when a custody route is supplied, matching audit under DK-23.
+        let plain_dir = test_dir("dk28-status-plain");
+        let plain_state = plain_dir.join("state.json");
+        let plain_doc = serde_json::json!({
+            "format": "deadbolt-state/1",
+            "credentials": [
+                {
+                    "name": "legacy-key",
+                    "value": VALUE_A,
+                    "scopes": [{"resource": "bucket", "action": "read"}],
+                    "enrolled_at": T0
+                }
+            ],
+            "grants": [],
+            "audit": [
+                {
+                    "seq": 1,
+                    "at": T0,
+                    "kind": "enroll",
+                    "credential": "legacy-key",
+                    "resource": null,
+                    "action": null,
+                    "run_id": null,
+                    "outcome": "enrolled"
+                }
+            ]
+        });
+        std::fs::write(&plain_state, format!("{plain_doc}\n")).unwrap();
+        set_mode(&plain_state, 0o600);
+        let adopted_status = deadbolt::status(&plain_state, &h.creating(), T0 + 5).unwrap();
+        assert_eq!(adopted_status.route, Route::Keychain);
+        assert_eq!(adopted_status.store.len(), 64);
+        assert_eq!(adopted_status.audit_entries, 2);
+        assert!(state_text(&plain_state).contains("deadbolt-envelope/1"));
+
+        // Populated sealed store across live, expired, retired, revoked, and cutoff grants.
+        let state = dir.join("state.json");
+        enroll_a(&h, &state);
+        let g_inc1 = deadbolt::grant(
+            &state,
+            &h.open(),
+            "cache-key",
+            &read_scope(),
+            300,
+            None,
+            T0 + 1,
+        )
+        .unwrap();
+        deadbolt::replace(
+            &state,
+            &h.open(),
+            "cache-key",
+            VALUE_B,
+            &[read_scope(), scope("bucket", "write")],
+            T0 + 10,
+        )
+        .unwrap();
+        let g_live = deadbolt::grant(
+            &state,
+            &h.open(),
+            "cache-key",
+            &read_scope(),
+            100,
+            Some("run-live"),
+            T0 + 20,
+        )
+        .unwrap();
+        deadbolt::enroll(
+            &state,
+            &h.open(),
+            "db-key",
+            VALUE_C,
+            &[scope("db", "query")],
+            T0 + 30,
+        )
+        .unwrap();
+        let g_rev = deadbolt::grant(
+            &state,
+            &h.open(),
+            "db-key",
+            &scope("db", "query"),
+            500,
+            None,
+            T0 + 31,
+        )
+        .unwrap();
+        deadbolt::revoke(&state, &h.open(), &g_rev.grant_id, T0 + 32).unwrap();
+        let g_cut = deadbolt::grant(
+            &state,
+            &h.open(),
+            "db-key",
+            &scope("db", "query"),
+            500,
+            Some("run-cut"),
+            T0 + 33,
+        )
+        .unwrap();
+        deadbolt::cutoff(&state, &h.open(), "run-cut", T0 + 34).unwrap();
+
+        let before_bytes = std::fs::read(&state).unwrap();
+        let snap_live: StoreStatus = deadbolt::status(&state, &h.open(), T0 + 119).unwrap();
+        let snap_expired: StoreStatus = deadbolt::status(&state, &h.open(), T0 + 120).unwrap();
+        let snap_at_ended_exp: StoreStatus = deadbolt::status(&state, &h.open(), T0 + 301).unwrap();
+        let snap_past_all: StoreStatus = deadbolt::status(&state, &h.open(), T0 + 600).unwrap();
+        let after_bytes = std::fs::read(&state).unwrap();
+        assert_eq!(
+            before_bytes, after_bytes,
+            "status must never rewrite a sealed store"
+        );
+
+        assert_eq!(snap_live.route, Route::Keychain);
+        assert_eq!(snap_live.store.len(), 64);
+        assert_eq!(
+            snap_live.credentials,
+            vec![
+                CredentialSummary {
+                    name: "cache-key".to_string(),
+                    scopes: vec![read_scope(), scope("bucket", "write")],
+                    enrolled_at: T0 + 10,
+                    incarnation: 2,
+                },
+                CredentialSummary {
+                    name: "db-key".to_string(),
+                    scopes: vec![scope("db", "query")],
+                    enrolled_at: T0 + 30,
+                    incarnation: 1,
+                },
+            ]
+        );
+        assert_eq!(
+            snap_live.grants,
+            vec![
+                GrantSummary {
+                    id: g_inc1.grant_id.clone(),
+                    credential: "cache-key".to_string(),
+                    resource: "bucket".to_string(),
+                    action: "read".to_string(),
+                    run_id: None,
+                    granted_at: T0 + 1,
+                    expires_at: T0 + 301,
+                    ended_at: Some(T0 + 10),
+                    end_reason: Some("retired".to_string()),
+                    incarnation: 1,
+                    status: GrantStatus::Revoked,
+                },
+                GrantSummary {
+                    id: g_live.grant_id.clone(),
+                    credential: "cache-key".to_string(),
+                    resource: "bucket".to_string(),
+                    action: "read".to_string(),
+                    run_id: Some("run-live".to_string()),
+                    granted_at: T0 + 20,
+                    expires_at: T0 + 120,
+                    ended_at: None,
+                    end_reason: None,
+                    incarnation: 2,
+                    status: GrantStatus::Live,
+                },
+                GrantSummary {
+                    id: g_rev.grant_id.clone(),
+                    credential: "db-key".to_string(),
+                    resource: "db".to_string(),
+                    action: "query".to_string(),
+                    run_id: None,
+                    granted_at: T0 + 31,
+                    expires_at: T0 + 531,
+                    ended_at: Some(T0 + 32),
+                    end_reason: Some("revoked".to_string()),
+                    incarnation: 1,
+                    status: GrantStatus::Revoked,
+                },
+                GrantSummary {
+                    id: g_cut.grant_id.clone(),
+                    credential: "db-key".to_string(),
+                    resource: "db".to_string(),
+                    action: "query".to_string(),
+                    run_id: Some("run-cut".to_string()),
+                    granted_at: T0 + 33,
+                    expires_at: T0 + 533,
+                    ended_at: Some(T0 + 34),
+                    end_reason: Some("cutoff".to_string()),
+                    incarnation: 1,
+                    status: GrantStatus::Revoked,
+                },
+            ]
+        );
+        assert_eq!(snap_expired.grants[1].status, GrantStatus::Expired);
+        assert_eq!(snap_at_ended_exp.grants[0].status, GrantStatus::Revoked);
+        assert_eq!(snap_at_ended_exp.grants[1].status, GrantStatus::Expired);
+        assert_eq!(snap_past_all.grants[0].status, GrantStatus::Revoked);
+        assert_eq!(snap_past_all.grants[1].status, GrantStatus::Expired);
+        assert_eq!(snap_past_all.grants[2].status, GrantStatus::Revoked);
+        assert_eq!(snap_past_all.grants[3].status, GrantStatus::Revoked);
+        assert_eq!(snap_live.audit_entries, 9);
+
+        let rendered_json = serde_json::to_string(&snap_live).unwrap();
+        let rendered_debug = format!("{snap_live:?}");
+        for forbidden in [
+            VALUE_A.to_string(),
+            VALUE_B.to_string(),
+            VALUE_C.to_string(),
+            g_inc1.token.clone(),
+            g_live.token.clone(),
+            g_rev.token.clone(),
+            g_cut.token.clone(),
+            sha256_hex(&g_inc1.token),
+            sha256_hex(&g_live.token),
+            sha256_hex(&g_rev.token),
+            sha256_hex(&g_cut.token),
+        ] {
+            assert!(!rendered_json.contains(&forbidden), "leaked {forbidden}");
+            assert!(!rendered_debug.contains(&forbidden), "leaked {forbidden}");
+        }
+        let parsed_status: serde_json::Value = serde_json::from_str(&rendered_json).unwrap();
+        for cred_val in parsed_status["credentials"].as_array().unwrap() {
+            assert!(cred_val.get("value").is_none());
+        }
+        for grant_val in parsed_status["grants"].as_array().unwrap() {
+            assert!(grant_val.get("token").is_none());
+            assert!(grant_val.get("token_hash").is_none());
+        }
+    }
+
+    #[test]
+    fn dk28_rekey_rotates_across_all_four_route_pairs_and_rolls_back_on_failures() {
+        let h = Harness::new();
+        let dir = test_dir("dk28-rekey");
+        let missing = dir.join("missing.json");
+
+        // Instant and current-route validation before opening.
+        assert!(matches!(
+            deadbolt::rekey(
+                &missing,
+                &h.open(),
+                Route::Passphrase,
+                &StaticPass(NEW_PASS_1.as_bytes()),
+                -1
+            ),
+            Err(Error::Caller(_))
+        ));
+        assert!(!missing.exists());
+        assert!(!dir.join("missing.json.lock").exists());
+
+        assert!(matches!(
+            deadbolt::rekey(
+                &missing,
+                &h.creating(),
+                Route::Passphrase,
+                &StaticPass(NEW_PASS_1.as_bytes()),
+                T0
+            ),
+            Err(Error::Caller(_))
+        ));
+        assert!(!dir.join("missing.json.lock").exists());
+
+        // Missing store refusal.
+        let miss_err = deadbolt::rekey(
+            &missing,
+            &h.open(),
+            Route::Passphrase,
+            &StaticPass(NEW_PASS_1.as_bytes()),
+            T0,
+        )
+        .unwrap_err();
+        assert!(matches!(miss_err, Error::Refusal(_)), "{miss_err}");
+        assert_eq!(
+            miss_err.to_string(),
+            "rekey refused, no store stands at that path"
+        );
+        assert!(!missing.exists());
+
+        // Unsealed plaintext store refuses as Caller naming adoption first without modifying disk.
+        let plain = dir.join("plain.json");
+        let plain_text =
+            "{\"format\":\"deadbolt-state/1\",\"credentials\":[],\"grants\":[],\"audit\":[]}\n";
+        std::fs::write(&plain, plain_text).unwrap();
+        set_mode(&plain, 0o600);
+        let plain_err =
+            deadbolt::rekey(&plain, &h.open(), Route::Keychain, &AbsentPass, T0).unwrap_err();
+        assert!(matches!(plain_err, Error::Caller(_)), "{plain_err}");
+        assert!(plain_err.to_string().contains("adoption"), "{plain_err}");
+        assert_eq!(state_text(&plain), plain_text);
+
+        // Stand up a keychain store with one credential and one live grant.
+        let state = dir.join("state.json");
+        enroll_a(&h, &state);
+        let receipt = deadbolt::grant(
+            &state,
+            &h.open(),
+            "cache-key",
+            &read_scope(),
+            3600,
+            None,
+            T0 + 1,
+        )
+        .unwrap();
+        let initial_status = deadbolt::status(&state, &h.open(), T0 + 2).unwrap();
+        let kc_store_1 = initial_status.store.clone();
+        assert!(matches!(
+            h.custody.load_key(&kc_store_1),
+            CustodyLoad::Key(_)
+        ));
+
+        // Invalid target passphrases refuse as Caller leaving sealed store and keychain entry untouched.
+        let before_bad_pass = std::fs::read(&state).unwrap();
+        let overlong = vec![b'x'; 1025];
+        for bad_pass in [
+            &AbsentPass as &dyn PassphraseSource,
+            &StaticPass(b""),
+            &StaticPass(&overlong),
+        ] {
+            let err = deadbolt::rekey(&state, &h.open(), Route::Passphrase, bad_pass, T0 + 3)
+                .unwrap_err();
+            assert!(matches!(err, Error::Caller(_)), "{err}");
+        }
+        assert_eq!(std::fs::read(&state).unwrap(), before_bad_pass);
+        assert!(matches!(
+            h.custody.load_key(&kc_store_1),
+            CustodyLoad::Key(_)
+        ));
+
+        // Custody store failure on keychain->keychain rolls back cleanly.
+        let failing_custody = FailingStoreCustody {
+            inner: &h.custody,
+            fail_store: AtomicBool::new(true),
+        };
+        let failing_unlock = Unlock {
+            route: None,
+            custody: &failing_custody,
+            passphrase: &AbsentPass,
+        };
+        let fail_err = deadbolt::rekey(
+            &state,
+            &failing_unlock,
+            Route::Keychain,
+            &AbsentPass,
+            T0 + 4,
+        )
+        .unwrap_err();
+        assert!(matches!(fail_err, Error::Refusal(_)), "{fail_err}");
+        assert_eq!(std::fs::read(&state).unwrap(), before_bad_pass);
+        assert!(matches!(
+            h.custody.load_key(&kc_store_1),
+            CustodyLoad::Key(_)
+        ));
+
+        // Publish failure on Unix cleans up newly created target keychain entry and keeps prior store intact.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            use std::sync::Mutex;
+
+            struct TrackingCustody<'a> {
+                inner: &'a FixtureCustody,
+                stored: Mutex<Vec<String>>,
+                deleted: Mutex<Vec<String>>,
+            }
+
+            impl<'a> KeyCustody for TrackingCustody<'a> {
+                fn store_key(&self, store_id: &str, key: &StoreKey) -> Result<(), CustodyError> {
+                    self.stored.lock().unwrap().push(store_id.to_string());
+                    self.inner.store_key(store_id, key)
+                }
+
+                fn load_key(&self, store_id: &str) -> CustodyLoad {
+                    self.inner.load_key(store_id)
+                }
+
+                fn delete_key(&self, store_id: &str) -> Result<(), CustodyError> {
+                    self.deleted.lock().unwrap().push(store_id.to_string());
+                    self.inner.delete_key(store_id)
+                }
+            }
+
+            let ro_dir = test_dir("dk28-rekey-ro-publish");
+            let ro_state = ro_dir.join("state.json");
+            let ro_h = Harness::new();
+            enroll_a(&ro_h, &ro_state);
+            let orig_id = deadbolt::status(&ro_state, &ro_h.open(), T0 + 1)
+                .unwrap()
+                .store;
+            let orig_bytes = std::fs::read(&ro_state).unwrap();
+            let tracking = TrackingCustody {
+                inner: &ro_h.custody,
+                stored: Mutex::new(Vec::new()),
+                deleted: Mutex::new(Vec::new()),
+            };
+            let track_unlock = Unlock {
+                route: None,
+                custody: &tracking,
+                passphrase: &AbsentPass,
+            };
+            // Acquire lock file ahead of making directory read-only so Session::open succeeds and publish_sealed fails on temp creation.
+            let _ = deadbolt::status(&ro_state, &ro_h.open(), T0 + 1).unwrap();
+            std::fs::set_permissions(&ro_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+            let pub_err = deadbolt::rekey(
+                &ro_state,
+                &track_unlock,
+                Route::Keychain,
+                &AbsentPass,
+                T0 + 5,
+            )
+            .unwrap_err();
+            std::fs::set_permissions(&ro_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+            assert!(matches!(pub_err, Error::Io(_)), "{pub_err}");
+            assert_eq!(std::fs::read(&ro_state).unwrap(), orig_bytes);
+            assert!(matches!(
+                ro_h.custody.load_key(&orig_id),
+                CustodyLoad::Key(_)
+            ));
+            let stored_ids = tracking.stored.lock().unwrap().clone();
+            let deleted_ids = tracking.deleted.lock().unwrap().clone();
+            assert_eq!(stored_ids.len(), 1);
+            assert_eq!(deleted_ids, stored_ids);
+            assert!(matches!(
+                ro_h.custody.load_key(&stored_ids[0]),
+                CustodyLoad::Absent
+            ));
+        }
+
+        // First pair moves keychain to passphrase.
+        let p1 = StaticPass(NEW_PASS_1.as_bytes());
+        let from_1 = deadbolt::rekey(&state, &h.open(), Route::Passphrase, &p1, T0 + 10).unwrap();
+        assert_eq!(from_1, Route::Keychain);
+        assert!(matches!(
+            h.custody.load_key(&kc_store_1),
+            CustodyLoad::Absent
+        ));
+        let inner_1 = decrypt_passphrase_json(&state, NEW_PASS_1.as_bytes());
+        assert!(
+            inner_1.get("store_id").is_none(),
+            "passphrase inner document must carry no store_id"
+        );
+        let u_p1 = Unlock {
+            route: None,
+            custody: &h.custody,
+            passphrase: &p1,
+        };
+        let st_1 = deadbolt::status(&state, &u_p1, T0 + 11).unwrap();
+        assert_eq!(st_1.route, Route::Passphrase);
+        assert_ne!(st_1.store, kc_store_1);
+        assert_eq!(
+            deadbolt::redeem(&state, &u_p1, &receipt.token, &read_scope(), T0 + 12).unwrap(),
+            VALUE_A
+        );
+
+        // Second pair moves passphrase to passphrase, rotating passphrase and salt.
+        let p2 = StaticPass(NEW_PASS_2.as_bytes());
+        let env_before_p2: serde_json::Value = serde_json::from_str(&state_text(&state)).unwrap();
+        let from_2 = deadbolt::rekey(&state, &u_p1, Route::Passphrase, &p2, T0 + 20).unwrap();
+        assert_eq!(from_2, Route::Passphrase);
+        // Old passphrase now fails authentication.
+        let old_p1_err = deadbolt::status(&state, &u_p1, T0 + 21).unwrap_err();
+        assert!(matches!(old_p1_err, Error::Refusal(_)), "{old_p1_err}");
+        assert!(old_p1_err.to_string().contains("key did not open it"));
+        let u_p2 = Unlock {
+            route: None,
+            custody: &h.custody,
+            passphrase: &p2,
+        };
+        let env_after_p2: serde_json::Value = serde_json::from_str(&state_text(&state)).unwrap();
+        assert_ne!(
+            env_before_p2["header"]["kdf"]["salt"],
+            env_after_p2["header"]["kdf"]["salt"]
+        );
+        assert!(decrypt_passphrase_json(&state, NEW_PASS_2.as_bytes())
+            .get("store_id")
+            .is_none());
+
+        // Third pair moves passphrase to keychain without consulting target passphrase.
+        let from_3 =
+            deadbolt::rekey(&state, &u_p2, Route::Keychain, &PanickingPass, T0 + 30).unwrap();
+        assert_eq!(from_3, Route::Passphrase);
+        let st_3 = deadbolt::status(&state, &h.open(), T0 + 31).unwrap();
+        assert_eq!(st_3.route, Route::Keychain);
+        let kc_store_3 = st_3.store.clone();
+        assert!(matches!(
+            h.custody.load_key(&kc_store_3),
+            CustodyLoad::Key(_)
+        ));
+        assert_eq!(
+            document_json(&h, &state)["store_id"],
+            serde_json::Value::String(kc_store_3.clone())
+        );
+
+        // Fourth pair moves keychain to keychain, rotating key and store_id and deleting prior entry.
+        let from_4 =
+            deadbolt::rekey(&state, &h.open(), Route::Keychain, &PanickingPass, T0 + 40).unwrap();
+        assert_eq!(from_4, Route::Keychain);
+        assert!(matches!(
+            h.custody.load_key(&kc_store_3),
+            CustodyLoad::Absent
+        ));
+        let st_4 = deadbolt::status(&state, &h.open(), T0 + 41).unwrap();
+        assert_ne!(st_4.store, kc_store_3);
+        assert_eq!(
+            document_json(&h, &state)["store_id"],
+            serde_json::Value::String(st_4.store.clone())
+        );
+        let trail = deadbolt::audit(&state, &h.open(), T0 + 42).unwrap();
+        let rekey_outcomes: Vec<&str> = trail
+            .iter()
+            .filter(|e| e.kind == "rekey")
+            .map(|e| e.outcome.as_str())
+            .collect();
+        assert_eq!(
+            rekey_outcomes,
+            vec![
+                "rekeyed, keychain to passphrase",
+                "rekeyed, passphrase to passphrase",
+                "rekeyed, passphrase to keychain",
+                "rekeyed, keychain to keychain",
+            ]
+        );
+        assert_eq!(
+            deadbolt::redeem(&state, &h.open(), &receipt.token, &read_scope(), T0 + 43).unwrap(),
+            VALUE_A
+        );
+
+        // Prior keychain deletion is best effort and never fails a published rekey.
+        let fail_del = FailingDeleteCustody { inner: &h.custody };
+        let fail_del_unlock = Unlock {
+            route: None,
+            custody: &fail_del,
+            passphrase: &AbsentPass,
+        };
+        let from_5 =
+            deadbolt::rekey(&state, &fail_del_unlock, Route::Passphrase, &p1, T0 + 44).unwrap();
+        assert_eq!(from_5, Route::Keychain);
+        let st_5 = deadbolt::status(&state, &u_p1, T0 + 45).unwrap();
+        assert_eq!(st_5.route, Route::Passphrase);
+
+        // On Unix, rekeying through a symlink path preserves the target file's keychain entry.
+        #[cfg(unix)]
+        {
+            let sym_dir = test_dir("dk28-rekey-symlink");
+            let sym_h = Harness::new();
+            let vault = sym_dir.join("vault.json");
+            let alias = sym_dir.join("alias.json");
+            enroll_a(&sym_h, &vault);
+            let vault_id = deadbolt::status(&vault, &sym_h.open(), T0 + 1)
+                .unwrap()
+                .store;
+            std::os::unix::fs::symlink(&vault, &alias).unwrap();
+            let sym_from =
+                deadbolt::rekey(&alias, &sym_h.open(), Route::Passphrase, &p1, T0 + 2).unwrap();
+            assert_eq!(sym_from, Route::Keychain);
+            assert!(matches!(
+                sym_h.custody.load_key(&vault_id),
+                CustodyLoad::Key(_)
+            ));
+            let vault_status = deadbolt::status(&vault, &sym_h.open(), T0 + 3).unwrap();
+            assert_eq!(vault_status.route, Route::Keychain);
+            assert_eq!(vault_status.store, vault_id);
+            let alias_unlock = Unlock {
+                route: None,
+                custody: &sym_h.custody,
+                passphrase: &p1,
+            };
+            let alias_status = deadbolt::status(&alias, &alias_unlock, T0 + 3).unwrap();
+            assert_eq!(alias_status.route, Route::Passphrase);
+        }
+    }
+
+    #[test]
+    fn dk28_cli_status_rekey_flags_broken_stdout_and_redeem_wrapper() {
+        let exe = env!("CARGO_BIN_EXE_deadbolt");
+        let expected_ver = format!("deadbolt {}\n", env!("CARGO_PKG_VERSION"));
+
+        for flag in ["-h", "--help"] {
+            let out = Command::new(exe).arg(flag).output().unwrap();
+            assert_eq!(out.status.code(), Some(0), "flag {flag}");
+            let text = String::from_utf8(out.stdout).unwrap();
+            assert!(text.starts_with("usage, deadbolt --state PATH"), "{text}");
+            assert!(text.contains("status, rekey"), "{text}");
+            assert!(out.stderr.is_empty());
+        }
+        for flag in ["-V", "--version"] {
+            let out = Command::new(exe).arg(flag).output().unwrap();
+            assert_eq!(out.status.code(), Some(0), "flag {flag}");
+            assert_eq!(String::from_utf8(out.stdout).unwrap(), expected_ver);
+            assert!(out.stderr.is_empty());
+        }
+        for bad in [
+            &["-V", "status"][..],
+            &["--help", "extra"][..],
+            &["--version=1"][..],
+        ] {
+            let out = Command::new(exe).args(bad).output().unwrap();
+            assert_eq!(out.status.code(), Some(2), "{bad:?}");
+            assert!(out.stdout.is_empty());
+            assert!(String::from_utf8_lossy(&out.stderr).starts_with("error: usage,"));
+        }
+        for flag in ["-h", "--help", "-V", "--version"] {
+            let dead = Command::new(exe)
+                .arg(flag)
+                .stdout(closed_stdout_stdio())
+                .stderr(Stdio::piped())
+                .output()
+                .unwrap();
+            assert_eq!(dead.status.code(), Some(2), "flag {flag}");
+            assert!(
+                String::from_utf8_lossy(&dead.stderr)
+                    .contains("error: the output could not be written because"),
+                "{}",
+                String::from_utf8_lossy(&dead.stderr)
+            );
+        }
+
+        // CLI enroll -> grant -> status -> rekey -> redeem_wrapper.py round trip.
+        let dir = test_dir("dk28-cli");
+        let state = dir.join("state.json");
+        let state_arg = state.to_string_lossy().into_owned();
+        let val_file = dir.join("val.txt");
+        std::fs::write(&val_file, format!("{VALUE_A}\n")).unwrap();
+        let val_arg = val_file.to_string_lossy().into_owned();
+
+        let en = Command::new(exe)
+            .args([
+                "--state",
+                &state_arg,
+                "--route",
+                "passphrase",
+                "enroll",
+                "--name",
+                "api-cred",
+                "--value-file",
+                &val_arg,
+                "--scope",
+                "bucket:read",
+            ])
+            .env("DEADBOLT_PASSPHRASE", CLI_PASSPHRASE)
+            .output()
+            .unwrap();
+        assert_eq!(
+            en.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&en.stderr)
+        );
+
+        let gr = Command::new(exe)
+            .args([
+                "--state",
+                &state_arg,
+                "grant",
+                "--credential",
+                "api-cred",
+                "--scope",
+                "bucket:read",
+                "--ttl",
+                "600",
+            ])
+            .env("DEADBOLT_PASSPHRASE", CLI_PASSPHRASE)
+            .output()
+            .unwrap();
+        assert_eq!(gr.status.code(), Some(0));
+        let gr_json: serde_json::Value = serde_json::from_slice(&gr.stdout).unwrap();
+        let token = gr_json["token"].as_str().unwrap().to_string();
+
+        let st = Command::new(exe)
+            .args(["--state", &state_arg, "status"])
+            .env("DEADBOLT_PASSPHRASE", CLI_PASSPHRASE)
+            .output()
+            .unwrap();
+        assert_eq!(st.status.code(), Some(0));
+        let st_text = String::from_utf8(st.stdout).unwrap();
+        assert!(!st_text.contains(VALUE_A));
+        assert!(!st_text.contains(&token));
+        assert!(!st_text.contains(&sha256_hex(&token)));
+        let st_json: serde_json::Value = serde_json::from_str(&st_text).unwrap();
+        assert_eq!(st_json["route"], "passphrase");
+        assert_eq!(st_json["credentials"][0]["name"], "api-cred");
+        assert_eq!(st_json["grants"][0]["status"], "live");
+
+        // CLI rekey passphrase -> passphrase using DEADBOLT_NEW_PASSPHRASE.
+        let rk = Command::new(exe)
+            .args(["--state", &state_arg, "rekey", "--to-route", "passphrase"])
+            .env("DEADBOLT_PASSPHRASE", CLI_PASSPHRASE)
+            .env("DEADBOLT_NEW_PASSPHRASE", STORE_PASSPHRASE)
+            .output()
+            .unwrap();
+        assert_eq!(
+            rk.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&rk.stderr)
+        );
+        let rk_json: serde_json::Value = serde_json::from_slice(&rk.stdout).unwrap();
+        assert_eq!(
+            rk_json,
+            serde_json::json!({"rekeyed": true, "from_route": "passphrase", "to_route": "passphrase"})
+        );
+
+        // Old CLI passphrase now fails, new passphrase works via redeem_wrapper.py.
+        let old_fail = Command::new(exe)
+            .args(["--state", &state_arg, "status"])
+            .env("DEADBOLT_PASSPHRASE", CLI_PASSPHRASE)
+            .output()
+            .unwrap();
+        assert_eq!(old_fail.status.code(), Some(1));
+
+        // On Unix, non-UTF-8 byte passphrases in DEADBOLT_PASSPHRASE and DEADBOLT_NEW_PASSPHRASE work cleanly.
+        #[cfg(unix)]
+        {
+            use std::ffi::OsString;
+            use std::os::unix::ffi::OsStringExt;
+
+            let raw_dir = test_dir("dk28-cli-raw-pass");
+            let raw_state = raw_dir.join("raw.json").to_string_lossy().into_owned();
+            let raw_p1 = OsString::from_vec(b"SYNTHETIC-TEST-VALUE-raw-\xff-p1".to_vec());
+            let raw_p2 = OsString::from_vec(b"SYNTHETIC-TEST-VALUE-raw-\xfe-p2".to_vec());
+            let raw_en = Command::new(exe)
+                .args([
+                    "--state",
+                    &raw_state,
+                    "--route",
+                    "passphrase",
+                    "enroll",
+                    "--name",
+                    "raw-cred",
+                    "--value-file",
+                    &val_arg,
+                    "--scope",
+                    "bucket:read",
+                ])
+                .env("DEADBOLT_PASSPHRASE", &raw_p1)
+                .output()
+                .unwrap();
+            assert_eq!(raw_en.status.code(), Some(0));
+            let raw_rk = Command::new(exe)
+                .args(["--state", &raw_state, "rekey", "--to-route", "passphrase"])
+                .env("DEADBOLT_PASSPHRASE", &raw_p1)
+                .env("DEADBOLT_NEW_PASSPHRASE", &raw_p2)
+                .output()
+                .unwrap();
+            assert_eq!(raw_rk.status.code(), Some(0));
+            let raw_st = Command::new(exe)
+                .args(["--state", &raw_state, "status"])
+                .env("DEADBOLT_PASSPHRASE", &raw_p2)
+                .output()
+                .unwrap();
+            assert_eq!(raw_st.status.code(), Some(0));
+        }
+
+        let py_bin = if Command::new("python3")
+            .arg("--version")
+            .output()
+            .is_ok_and(|out| out.status.success())
+        {
+            "python3"
+        } else {
+            "python"
+        };
+        let wrapper = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("examples")
+            .join("redeem_wrapper.py");
+        let child_probe = "import os, sys; assert 'DEADBOLT_TOKEN' not in os.environ and 'DEADBOLT_PASSPHRASE' not in os.environ and 'DEADBOLT_NEW_PASSPHRASE' not in os.environ; sys.stdout.write('ok=' + str(os.environ['TARGET_SECRET'] == 'SYNTHETIC-TEST-VALUE-alpha-0001') + '\\n')";
+        let wrap_ok = Command::new(py_bin)
+            .arg(&wrapper)
+            .args([
+                "--state",
+                &state_arg,
+                "--scope",
+                "bucket:read",
+                "--env-var",
+                "TARGET_SECRET",
+                "--deadbolt-bin",
+                exe,
+                "--",
+                py_bin,
+                "-c",
+                child_probe,
+            ])
+            .env("DEADBOLT_TOKEN", &token)
+            .env("DEADBOLT_PASSPHRASE", STORE_PASSPHRASE)
+            .env("DEADBOLT_NEW_PASSPHRASE", NEW_PASS_1)
+            .output()
+            .unwrap();
+        assert_eq!(
+            wrap_ok.status.code(),
+            Some(0),
+            "stderr {}",
+            String::from_utf8_lossy(&wrap_ok.stderr)
+        );
+        let wrap_stdout = String::from_utf8(wrap_ok.stdout).unwrap();
+        assert_eq!(wrap_stdout.trim(), "ok=True");
+        assert!(!wrap_stdout.contains(VALUE_A));
+        assert!(!wrap_stdout.contains(STORE_PASSPHRASE));
+        assert!(!wrap_stdout.contains(NEW_PASS_1));
+
+        // On Unix, a synthetic deadbolt stub verifies that redeem_wrapper.py preserves trailing CR and refuses embedded NUL bytes.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let cr_stub = dir.join("stub-cr.sh");
+            std::fs::write(
+                &cr_stub,
+                "#!/bin/sh\nprintf 'SYNTHETIC-TEST-VALUE-cr\\r\\n'\n",
+            )
+            .unwrap();
+            std::fs::set_permissions(&cr_stub, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let cr_stub_arg = cr_stub.to_string_lossy().into_owned();
+            let cr_probe = "import os, sys; sys.stdout.write('cr=' + str(os.environ['TARGET_SECRET'] == 'SYNTHETIC-TEST-VALUE-cr\\r') + '\\n')";
+            let wrap_cr = Command::new(py_bin)
+                .arg(&wrapper)
+                .args([
+                    "--state",
+                    &state_arg,
+                    "--scope",
+                    "bucket:read",
+                    "--env-var",
+                    "TARGET_SECRET",
+                    "--token",
+                    &token,
+                    "--deadbolt-bin",
+                    &cr_stub_arg,
+                    "--",
+                    py_bin,
+                    "-c",
+                    cr_probe,
+                ])
+                .output()
+                .unwrap();
+            assert_eq!(wrap_cr.status.code(), Some(0));
+            assert_eq!(String::from_utf8_lossy(&wrap_cr.stdout).trim(), "cr=True");
+
+            let nul_stub = dir.join("stub-nul.sh");
+            std::fs::write(
+                &nul_stub,
+                "#!/bin/sh\nprintf 'SYNTHETIC-TEST-VALUE-a\\0b\\n'\n",
+            )
+            .unwrap();
+            std::fs::set_permissions(&nul_stub, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let nul_stub_arg = nul_stub.to_string_lossy().into_owned();
+            let wrap_nul = Command::new(py_bin)
+                .arg(&wrapper)
+                .args([
+                    "--state",
+                    &state_arg,
+                    "--scope",
+                    "bucket:read",
+                    "--env-var",
+                    "TARGET_SECRET",
+                    "--token",
+                    &token,
+                    "--deadbolt-bin",
+                    &nul_stub_arg,
+                    "--",
+                    py_bin,
+                    "-c",
+                    "pass",
+                ])
+                .output()
+                .unwrap();
+            assert_eq!(wrap_nul.status.code(), Some(2));
+            assert!(!String::from_utf8_lossy(&wrap_nul.stderr).contains("Traceback"));
+        }
+
+        // Wrapper help flags exit 0 even without -- separator.
+        for hflag in ["-h", "--help"] {
+            let wh = Command::new(py_bin)
+                .arg(&wrapper)
+                .arg(hflag)
+                .output()
+                .unwrap();
+            assert_eq!(wh.status.code(), Some(0), "wrapper {hflag}");
+            assert!(String::from_utf8_lossy(&wh.stdout).contains("--env-var"));
+            assert!(wh.stderr.is_empty());
+        }
+
+        // Wrapper refuses missing --, empty command after --, invalid/reserved env names, missing token, and missing binary at exit 2.
+        let no_sep = Command::new(py_bin)
+            .arg(&wrapper)
+            .args([
+                "--state",
+                &state_arg,
+                "--scope",
+                "bucket:read",
+                "--env-var",
+                "TARGET_SECRET",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(no_sep.status.code(), Some(2));
+
+        let empty_cmd = Command::new(py_bin)
+            .arg(&wrapper)
+            .args([
+                "--state",
+                &state_arg,
+                "--scope",
+                "bucket:read",
+                "--env-var",
+                "TARGET_SECRET",
+                "--",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(empty_cmd.status.code(), Some(2));
+
+        for bad_env in [
+            "1BAD",
+            "FOO\n",
+            "DEADBOLT_TOKEN",
+            "DEADBOLT_PASSPHRASE",
+            "DEADBOLT_NEW_PASSPHRASE",
+        ] {
+            let bad_e = Command::new(py_bin)
+                .arg(&wrapper)
+                .args([
+                    "--state",
+                    &state_arg,
+                    "--scope",
+                    "bucket:read",
+                    "--env-var",
+                    bad_env,
+                    "--",
+                    py_bin,
+                    "-c",
+                    "pass",
+                ])
+                .output()
+                .unwrap();
+            assert_eq!(bad_e.status.code(), Some(2), "bad env {bad_env:?}");
+        }
+
+        let no_tok = Command::new(py_bin)
+            .arg(&wrapper)
+            .args([
+                "--state",
+                &state_arg,
+                "--scope",
+                "bucket:read",
+                "--env-var",
+                "TARGET_SECRET",
+                "--",
+                py_bin,
+                "-c",
+                "pass",
+            ])
+            .env_remove("DEADBOLT_TOKEN")
+            .output()
+            .unwrap();
+        assert_eq!(no_tok.status.code(), Some(2));
+
+        let missing_bin = dir.join("no-such-deadbolt").to_string_lossy().into_owned();
+        let bad_bin = Command::new(py_bin)
+            .arg(&wrapper)
+            .args([
+                "--state",
+                &state_arg,
+                "--scope",
+                "bucket:read",
+                "--env-var",
+                "TARGET_SECRET",
+                "--token",
+                &token,
+                "--deadbolt-bin",
+                &missing_bin,
+                "--",
+                py_bin,
+                "-c",
+                "pass",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(bad_bin.status.code(), Some(2));
+        assert!(!String::from_utf8_lossy(&bad_bin.stderr).contains("Traceback"));
+
+        let missing_child = dir.join("no-such-child").to_string_lossy().into_owned();
+        let bad_child = Command::new(py_bin)
+            .arg(&wrapper)
+            .args([
+                "--state",
+                &state_arg,
+                "--scope",
+                "bucket:read",
+                "--env-var",
+                "TARGET_SECRET",
+                "--token",
+                &token,
+                "--deadbolt-bin",
+                exe,
+                "--",
+                &missing_child,
+            ])
+            .env("DEADBOLT_PASSPHRASE", STORE_PASSPHRASE)
+            .output()
+            .unwrap();
+        assert_eq!(bad_child.status.code(), Some(127));
+        let bad_child_err = String::from_utf8_lossy(&bad_child.stderr);
+        assert!(!bad_child_err.contains("Traceback"));
+        assert!(!bad_child_err.contains(VALUE_A));
+        assert!(bad_child.stdout.is_empty());
+
+        let wrap_bad = Command::new(py_bin)
+            .arg(&wrapper)
+            .args([
+                "--state",
+                &state_arg,
+                "--scope",
+                "bucket:write",
+                "--env-var",
+                "TARGET_SECRET",
+                "--token",
+                &token,
+                "--deadbolt-bin",
+                exe,
+                "--",
+                py_bin,
+                "-c",
+                "raise SystemExit(0)",
+            ])
+            .env("DEADBOLT_PASSPHRASE", STORE_PASSPHRASE)
+            .output()
+            .unwrap();
+        assert_eq!(wrap_bad.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&wrap_bad.stderr).contains("scope mismatch"));
+    }
+}
