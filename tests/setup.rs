@@ -536,9 +536,20 @@ fn codepoint_scan_extra_argument_on_dead_stderr_exits_two() {
     use std::io::Write;
     let dir = temp_dir("extra-argument-dead-stderr");
     std::fs::write(dir.join("clean.md"), "clean").unwrap();
-    let (reader, mut writer) = std::io::pipe().unwrap();
-    drop(reader);
-    assert!(writer.write_all(b"probe").is_err());
+    // Portability adaptation retries pipe creation when a concurrent child
+    // spawn on macOS inherits reader before FIOCLEX closes the race window.
+    let writer = (0..64)
+        .find_map(|_| {
+            let (reader, mut writer) = std::io::pipe().unwrap();
+            drop(reader);
+            if writer.write_all(b"probe").is_err() {
+                Some(writer)
+            } else {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                None
+            }
+        })
+        .expect("writes to a closed pipe must fail");
     let status = Command::new(env!("CARGO_BIN_EXE_codepoint_scan"))
         .arg(&dir)
         .arg("second-root")
@@ -601,4 +612,108 @@ fn codepoint_scan_refuses_a_root_that_does_not_stand() {
     );
     assert_eq!(result.stderr.lines().count(), 1, "{}", result.stderr);
     assert!(result.stdout.is_empty(), "{}", result.stdout);
+}
+
+#[test]
+fn codepoint_scan_counts_both_dashes_in_one_tree() {
+    let dir = temp_dir("both-dashes");
+    std::fs::write(dir.join("alpha.md"), "a\u{2014}b\u{2014}c\u{2013}d").unwrap();
+    std::fs::write(dir.join("beta.md"), "a\u{2014}b").unwrap();
+    let result = scan_tree(&dir);
+    assert_eq!(result.status, 1, "{}", result.stderr);
+    let expected = format!(
+        "{}: em dash 2, en dash 1\n{}: em dash 1, en dash 0\nem dash U+2014 count 3\nen dash U+2013 count 1\n",
+        dir.join("alpha.md").display(),
+        dir.join("beta.md").display()
+    );
+    assert_eq!(result.stdout, expected);
+}
+
+#[test]
+fn codepoint_scan_skips_every_excluded_dir_below_the_root() {
+    let dir = temp_dir("excluded-dirs-all");
+    for name in [
+        ".git",
+        "__pycache__",
+        ".pytest_cache",
+        ".venv",
+        "venv",
+        "node_modules",
+        "build",
+        "dist",
+        "target",
+    ] {
+        let excluded = dir.join(name);
+        std::fs::create_dir_all(&excluded).unwrap();
+        std::fs::write(excluded.join("note.md"), "a\u{2014}b").unwrap();
+    }
+    std::fs::write(dir.join("clean.md"), "clean").unwrap();
+    let result = scan_tree(&dir);
+    assert_eq!(result.status, 0);
+    assert!(result.stdout.contains("em dash U+2014 count 0"));
+    assert!(result.stdout.contains("en dash U+2013 count 0"));
+    let control = temp_dir("excluded-dirs-all-control");
+    let inside = control.join("real-dir");
+    std::fs::create_dir_all(&inside).unwrap();
+    std::fs::write(inside.join("note.md"), "a\u{2014}b").unwrap();
+    let result = scan_tree(&control);
+    assert_eq!(result.status, 1);
+    assert!(result.stdout.contains("em dash U+2014 count 1"));
+}
+
+#[test]
+fn codepoint_scan_skips_every_binary_suffix() {
+    let dir = temp_dir("binary-suffixes-all");
+    for suffix in [
+        "png", "jpg", "jpeg", "gif", "ico", "webp", "pdf", "zip", "gz", "tar", "whl", "so", "dylib",
+    ] {
+        std::fs::write(dir.join(format!("sample.{suffix}")), "a\u{2014}b").unwrap();
+    }
+    let result = scan_tree(&dir);
+    assert_eq!(result.status, 0);
+    assert!(result.stdout.contains("em dash U+2014 count 0"));
+    assert!(result.stdout.contains("en dash U+2013 count 0"));
+    let control = temp_dir("binary-suffixes-all-control");
+    std::fs::write(control.join("note.md"), "a\u{2014}b").unwrap();
+    let result = scan_tree(&control);
+    assert_eq!(result.status, 1);
+    assert!(result.stdout.contains("em dash U+2014 count 1"));
+}
+
+// Portability adaptation gates Unix directory symlink staging to Unix.
+#[cfg(unix)]
+#[test]
+fn codepoint_scan_does_not_follow_a_symlink_to_a_directory() {
+    let outside = temp_dir("symlink-dir-outside");
+    std::fs::write(outside.join("note.md"), "a\u{2014}b").unwrap();
+    let dir = temp_dir("symlink-dir");
+    std::fs::write(dir.join("clean.md"), "clean").unwrap();
+    std::os::unix::fs::symlink(&outside, dir.join("linked-dir")).unwrap();
+    let result = scan_tree(&dir);
+    assert_eq!(result.status, 0, "{}", result.stderr);
+    assert!(result.stdout.contains("em dash U+2014 count 0"));
+    assert!(result.stdout.contains("en dash U+2013 count 0"));
+    let control = temp_dir("symlink-dir-control");
+    let inside = control.join("real-dir");
+    std::fs::create_dir_all(&inside).unwrap();
+    std::fs::write(inside.join("note.md"), "a\u{2014}b").unwrap();
+    let result = scan_tree(&control);
+    assert_eq!(result.status, 1);
+    assert!(result.stdout.contains("em dash U+2014 count 1"));
+}
+
+// Portability adaptation gates mkfifo and symlink-to-FIFO staging to Unix.
+#[cfg(unix)]
+#[test]
+fn codepoint_scan_skips_a_symlink_to_a_fifo_and_terminates() {
+    let dir = temp_dir("symlink-fifo");
+    std::fs::write(dir.join("clean.md"), "clean").unwrap();
+    let pipe_path = dir.join("pipe");
+    let made = Command::new("mkfifo").arg(&pipe_path).output().unwrap();
+    assert!(made.status.success());
+    std::os::unix::fs::symlink(&pipe_path, dir.join("linked-pipe")).unwrap();
+    let result = scan_tree_with_deadline(&dir).expect("the scan terminated");
+    assert_eq!(result.status, 0, "{}", result.stderr);
+    assert!(result.stdout.contains("em dash U+2014 count 0"));
+    assert!(result.stdout.contains("en dash U+2013 count 0"));
 }

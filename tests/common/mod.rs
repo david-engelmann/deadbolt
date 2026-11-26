@@ -1,14 +1,16 @@
 //! The shared test harness home of audit finding DK-A19.
 //!
 //! The helpers the integration suites once copied stand here
-//! once: the temporary directory builder behind a prefix
+//! once, the temporary directory builder behind a prefix
 //! parameter, the state file reader, the mode setter, the read
 //! scope, the two hexadecimal helpers, and the envelope
 //! decryptor the document assertions read through. Each suite
 //! declares this module with dead code allowed, since no suite
-//! uses every helper it carries. The audit pin files do not
-//! join: each stands alone as its round's closed evidence and
-//! keeps its own small harness, by the rule the finding records.
+//! uses every helper it carries. The standalone file separation
+//! of DK-A19 was retired to fold twenty integration test targets
+//! into the four suite binaries without redundant compile and
+//! link fan-out, and each consolidated audit round submodule
+//! keeps its own isolated namespace and small harness verbatim.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
