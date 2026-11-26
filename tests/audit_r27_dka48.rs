@@ -27,6 +27,7 @@
 //! runs against the fixture backend, and no test here touches
 //! a real keychain.
 
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -68,7 +69,11 @@ impl PassphraseSource for Supply {
 fn write_store_bytes(dir: &Path, bytes: &[u8]) -> PathBuf {
     let state = dir.join("state.json");
     std::fs::write(&state, bytes).unwrap();
-    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o600)).unwrap();
+    // Portability adaptation applies POSIX 0600 mode bits on Unix only.
+    #[cfg(unix)]
+    {
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
     state
 }
 

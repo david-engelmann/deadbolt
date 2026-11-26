@@ -838,6 +838,9 @@ fn dir_entries(dir: &Path) -> Vec<String> {
     names
 }
 
+// Portability adaptation gates POSIX 0600 mode checks to Unix per the
+// portability amendment in CONTRACT.md.
+#[cfg(unix)]
 #[test]
 fn the_permission_gate_stands_before_any_custody() {
     let ctx = Ctx::with_passphrase(PASSPHRASE);

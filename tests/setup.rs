@@ -430,6 +430,8 @@ fn codepoint_scan_skips_a_file_with_an_uppercase_binary_suffix() {
 // pin fails on the missing answer, where against the fix the
 // scan answers at once.
 
+// Portability adaptation gates mkfifo and Unix symlink staging to Unix.
+#[cfg(unix)]
 fn scan_tree_with_deadline(root: &Path) -> Option<ScanOutput> {
     let mut child = Command::new(env!("CARGO_BIN_EXE_codepoint_scan"))
         .arg(root)
@@ -460,6 +462,7 @@ fn scan_tree_with_deadline(root: &Path) -> Option<ScanOutput> {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn codepoint_scan_skips_a_fifo_and_terminates() {
     let dir = temp_dir("fifo");
@@ -475,6 +478,7 @@ fn codepoint_scan_skips_a_fifo_and_terminates() {
     assert!(result.stdout.contains("en dash U+2013 count 0"));
 }
 
+#[cfg(unix)]
 #[test]
 fn codepoint_scan_counts_a_dash_through_a_symlink_to_a_file() {
     let dir = temp_dir("symlink-file");
@@ -485,6 +489,7 @@ fn codepoint_scan_counts_a_dash_through_a_symlink_to_a_file() {
     assert!(result.stdout.contains("em dash U+2014 count 2"));
 }
 
+#[cfg(unix)]
 #[test]
 fn codepoint_scan_skips_a_dangling_symlink() {
     let dir = temp_dir("symlink-dangling");
@@ -493,6 +498,55 @@ fn codepoint_scan_skips_a_dangling_symlink() {
     let result = scan_tree(&dir);
     assert_eq!(result.status, 0, "{}", result.stderr);
     assert!(result.stdout.contains("em dash U+2014 count 0"));
+}
+
+#[test]
+fn portability_workflow_carries_the_fleet_credential_hygiene() {
+    let port_text = read(".github/workflows/portability.yml");
+    assert!(port_text.contains("permissions:\n  contents: read"));
+    assert!(!port_text.contains("write-all"));
+    assert!(!port_text.contains("contents: write"));
+    let checkouts = port_text.matches("actions/checkout@").count();
+    assert_eq!(checkouts, 3);
+    assert_eq!(
+        port_text.matches("persist-credentials: false").count(),
+        checkouts
+    );
+    assert!(!port_text.contains("rust-toolchain@master"));
+    let toolchain_lines: Vec<&str> = port_text
+        .lines()
+        .filter(|line| line.contains("dtolnay/rust-toolchain@"))
+        .collect();
+    assert_eq!(toolchain_lines.len(), 3);
+    for toolchain_line in toolchain_lines {
+        let pin = toolchain_line
+            .split("dtolnay/rust-toolchain@")
+            .nth(1)
+            .unwrap()
+            .trim();
+        assert_eq!(pin.len(), 40, "{}", toolchain_line);
+        assert!(pin
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
+    }
+}
+
+#[test]
+fn codepoint_scan_extra_argument_on_dead_stderr_exits_two() {
+    use std::io::Write;
+    let dir = temp_dir("extra-argument-dead-stderr");
+    std::fs::write(dir.join("clean.md"), "clean").unwrap();
+    let (reader, mut writer) = std::io::pipe().unwrap();
+    drop(reader);
+    assert!(writer.write_all(b"probe").is_err());
+    let status = Command::new(env!("CARGO_BIN_EXE_codepoint_scan"))
+        .arg(&dir)
+        .arg("second-root")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::from(writer))
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(2));
 }
 
 // Audit finding DK-A42: the scanner refuses an argument standing

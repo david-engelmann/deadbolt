@@ -9,15 +9,11 @@
 //! the taxonomy standing.
 //!
 //! Every fixture is synthetic and names itself as one. The full
-//! stream is /dev/full, the device whose writes always fail with
-//! no space, driven here exactly as an operator's full disk or
-//! closed pipe presents it. Custody runs on the passphrase route,
-//! and no test here touches a real keychain. The pins stand on
-//! /dev/full, a Linux device, so the file stands gated to Linux;
-//! the behavior they pin is the binaries' own and stands on
-//! every platform, and the fixture is the platform bound part.
-
-#![cfg(target_os = "linux")]
+//! stream prefers /dev/full where the host provides it and falls
+//! back to a pipe whose reader is closed on hosts without /dev/full,
+//! proving a failing write before handing the stream to the child
+//! so these pins run across Linux, macOS, and Windows. Custody runs
+//! on the passphrase route, and no test here touches a real keychain.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -39,14 +35,23 @@ fn test_dir(tag: &str) -> PathBuf {
     dir
 }
 
-/// A writable handle on /dev/full, the device that refuses every
-/// write with no space left.
+/// A writable handle whose writes always fail, using /dev/full when
+/// present and falling back to a pipe with its reader closed.
 fn full_stream() -> Stdio {
-    let file = std::fs::OpenOptions::new()
+    use std::io::Write;
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .read(true)
         .write(true)
         .open("/dev/full")
-        .unwrap();
-    Stdio::from(file)
+    {
+        if file.write_all(b"probe").is_err() {
+            return Stdio::from(file);
+        }
+    }
+    let (reader, mut writer) = std::io::pipe().unwrap();
+    drop(reader);
+    assert!(writer.write_all(b"probe").is_err());
+    Stdio::from(writer)
 }
 
 struct CliOutput {

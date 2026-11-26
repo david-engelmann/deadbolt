@@ -10,7 +10,6 @@
 //! join: each stands alone as its round's closed evidence and
 //! keeps its own small harness, by the rule the finding records.
 
-use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -45,7 +44,16 @@ pub fn state_text(state: &PathBuf) -> String {
 
 /// Set a state file's mode bits, for the permission gate pins.
 pub fn set_mode(state: &PathBuf, mode: u32) {
-    std::fs::set_permissions(state, std::fs::Permissions::from_mode(mode)).unwrap();
+    // Portability adaptation applies POSIX mode bits on Unix only.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(state, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (state, mode);
+    }
 }
 
 const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";

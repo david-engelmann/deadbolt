@@ -10,6 +10,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
@@ -26,6 +27,7 @@ use envelope::{Header, Kdf, Sealed};
 pub mod custody;
 pub mod envelope;
 
+use zeroize::Zeroize;
 pub use zeroize::Zeroizing;
 
 pub const FORMAT: &str = "deadbolt-state/1";
@@ -251,6 +253,13 @@ struct Credential {
         skip_serializing_if = "incarnation_stands_at_one"
     )]
     incarnation: u64,
+}
+
+impl Drop for Credential {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.value.zeroize();
+    }
 }
 
 #[derive(PartialEq, Serialize, Deserialize)]
@@ -691,6 +700,19 @@ fn establish_custody(
     }
 }
 
+struct ByteCount(usize);
+
+impl Write for ByteCount {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0 += buf.len();
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Render a document and seal it in its envelope under a header
 /// and a key.
 ///
@@ -699,10 +721,16 @@ fn establish_custody(
 /// serialization wording, so the rendering discipline stands in
 /// exactly one place.
 fn seal_document(state: &State, header: &Header, key: &StoreKey) -> Result<String, Error> {
-    let text = serde_json::to_string_pretty(state).map_err(|_| {
+    let mut count = ByteCount(0);
+    serde_json::to_writer_pretty(&mut count, state).map_err(|_| {
         Error::Corrupt("the state could not be written in its own format".to_string())
     })?;
-    envelope::seal(header, key, format!("{text}\n").as_bytes())
+    let mut plain = Zeroizing::new(Vec::with_capacity(count.0 + 1));
+    serde_json::to_writer_pretty(&mut *plain, state).map_err(|_| {
+        Error::Corrupt("the state could not be written in its own format".to_string())
+    })?;
+    plain.push(b'\n');
+    envelope::seal(header, key, &plain)
 }
 
 /// Open a sealed envelope and strictly read the document inside
@@ -713,11 +741,11 @@ fn seal_document(state: &State, header: &Header, key: &StoreKey) -> Result<Strin
 /// wording, and the strict read, so the reading discipline stands
 /// in exactly one place.
 fn open_document(sealed: &envelope::Sealed, key: &StoreKey) -> Result<State, Error> {
-    let plain = envelope::open_sealed(sealed, key)?;
-    let plain_text = String::from_utf8(plain).map_err(|_| {
+    let plain = Zeroizing::new(envelope::open_sealed(sealed, key)?);
+    let plain_text = std::str::from_utf8(&plain).map_err(|_| {
         Error::Corrupt("the state document inside the envelope is not valid UTF-8 text".to_string())
     })?;
-    parse_state(&plain_text)
+    parse_state(plain_text)
 }
 
 /// Prove a freshly sealed adoption envelope in memory, DK-23.
@@ -765,34 +793,82 @@ struct Session<'a> {
     _lock: File,
 }
 
-impl<'a> Session<'a> {
-    fn open(state_path: &Path, unlock: &'a Unlock<'a>, now: i64) -> Result<Session<'a>, Error> {
-        let lock_path = PathBuf::from(format!("{}.lock", state_path.display()));
-        let lock = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .read(true)
-            .write(true)
+fn lock_identity_holds(lock: &File, lock_path: &Path) -> std::io::Result<bool> {
+    #[cfg(unix)]
+    {
+        let held = lock.metadata()?;
+        match std::fs::metadata(lock_path) {
+            Ok(standing) => Ok(held.dev() == standing.dev() && held.ino() == standing.ino()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(err) => Err(err),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        // On Windows, acquire_lock opens the lock file without
+        // FILE_SHARE_DELETE so the operating system prevents
+        // unlinking or renaming while the handle stands open.
+        let _ = (lock, lock_path);
+        Ok(true)
+    }
+}
+
+fn acquire_lock(state_path: &Path) -> Result<File, Error> {
+    let mut lock_os = state_path.as_os_str().to_os_string();
+    lock_os.push(".lock");
+    let lock_path = PathBuf::from(lock_os);
+    for _ in 0..16 {
+        let mut options = OpenOptions::new();
+        options.create(true).truncate(false).read(true).write(true);
+        #[cfg(unix)]
+        {
+            options.mode(0o600);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            options.share_mode(0x00000001 | 0x00000002);
+        }
+        let lock = options
             .open(&lock_path)
             .map_err(|err| io_refusal(state_path, err))?;
         lock.lock_exclusive()
             .map_err(|err| io_refusal(state_path, err))?;
+        if lock_identity_holds(&lock, &lock_path).map_err(|err| io_refusal(state_path, err))? {
+            return Ok(lock);
+        }
+    }
+    Err(io_refusal(
+        state_path,
+        std::io::Error::other("the lock file kept changing while opening the store"),
+    ))
+}
+
+impl<'a> Session<'a> {
+    fn open(state_path: &Path, unlock: &'a Unlock<'a>, now: i64) -> Result<Session<'a>, Error> {
+        let lock = acquire_lock(state_path)?;
         match std::fs::metadata(state_path) {
             Ok(metadata) => {
-                let mode = metadata.mode() & 0o777;
-                if mode & 0o077 != 0 {
-                    return Err(Error::Permission(format!(
-                        "the state file mode {mode:o} grants group or other access, and the broker refuses to operate on it"
-                    )));
+                #[cfg(unix)]
+                {
+                    let mode = metadata.mode() & 0o777;
+                    if mode & 0o077 != 0 {
+                        return Err(Error::Permission(format!(
+                            "the state file mode {mode:o} grants group or other access, and the broker refuses to operate on it"
+                        )));
+                    }
                 }
-                let text = std::fs::read_to_string(state_path).map_err(|err| {
+                #[cfg(not(unix))]
+                {
+                    let _ = metadata;
+                }
+                let text = Zeroizing::new(std::fs::read_to_string(state_path).map_err(|err| {
                     if err.kind() == std::io::ErrorKind::InvalidData {
                         Error::Corrupt("the state file is not valid UTF-8 text".to_string())
                     } else {
                         io_refusal(state_path, err)
                     }
-                })?;
+                })?);
                 if envelope::names_envelope(&text) {
                     let sealed = envelope::parse_envelope(&text)?;
                     if unlock.route.is_some() {
@@ -958,10 +1034,13 @@ impl<'a> Session<'a> {
             .map_err(|_| Error::Io(std::io::Error::other("the random source refused")))?;
         let temp_path = directory.join(format!(".{file_name}.tmp-{}", hex(&random)));
         let write = (|| -> Result<(), Error> {
-            let mut file = OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .mode(0o600)
+            let mut options = OpenOptions::new();
+            options.create_new(true).write(true);
+            #[cfg(unix)]
+            {
+                options.mode(0o600);
+            }
+            let mut file = options
                 .open(&temp_path)
                 .map_err(|err| io_refusal(&temp_path, err))?;
             file.write_all(sealed_text.as_bytes())
@@ -1299,6 +1378,7 @@ pub fn replace(
     };
     let ended = end_live_grants(&mut session.state.grants, name, now);
     let credential = &mut session.state.credentials[position];
+    credential.value.zeroize();
     credential.value = value.to_string();
     credential.scopes = scopes.to_vec();
     credential.enrolled_at = now;

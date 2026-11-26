@@ -1,13 +1,15 @@
 //! Pins for the custody seam of DK-18 and DK-19, driven through the
 //! fixture backend and the passphrase backend.
 //!
-//! The platform backend is constructed and driven once, in
-//! platform_custody_without_a_service_answers_service_failure,
-//! against the machine the suite runs on. That machine runs no
-//! keychain service, so the drive lands in the failure outcome, which
-//! is the outcome DK-24 names as the residue this suite cannot retire.
+//! The platform backend is constructed and driven in
+//! platform_custody_without_a_service_answers_service_failure on
+//! hosts where no keychain service answers, landing in the failure
+//! outcome DK-24 names for the default gate, and in
+//! platform_custody_round_trips_against_a_live_service_when_armed
+//! when DEADBOLT_LIVE_KEYCHAIN_TEST arms the live round trip inside
+//! an ephemeral keychain session.
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 use deadbolt::custody::platform_custody;
 use deadbolt::custody::{
     derive_key, derive_key_with_params, store_key_from_secret, CustodyLoad, FixtureCustody,
@@ -236,4 +238,24 @@ fn derive_key_derives_at_the_pinned_parameters() {
     let at_pinned = derive_key_with_params(PROBE_PASSPHRASE, &PROBE_SALT, 65_536, 3).unwrap();
     assert_eq!(derived, at_pinned);
     assert_eq!(hex(derived.as_bytes()), DERIVATION_VECTOR_HEX);
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+#[test]
+fn platform_custody_round_trips_against_a_live_service_when_armed() {
+    if std::env::var_os("DEADBOLT_LIVE_KEYCHAIN_TEST").is_none() {
+        return;
+    }
+    let custody = platform_custody();
+    let live_id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let _ = custody.delete_key(live_id);
+    assert_eq!(custody.load_key(live_id), CustodyLoad::Absent);
+    let key = sample_key();
+    custody.store_key(live_id, &key).unwrap();
+    match custody.load_key(live_id) {
+        CustodyLoad::Key(loaded) => assert_eq!(loaded, key),
+        other => panic!("expected the stored key from the live service, got {other:?}"),
+    }
+    custody.delete_key(live_id).unwrap();
+    assert_eq!(custody.load_key(live_id), CustodyLoad::Absent);
 }

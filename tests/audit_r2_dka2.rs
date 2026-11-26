@@ -12,6 +12,7 @@
 //! by sabotaging the filesystem inside the double's store_key,
 //! so the publish that follows the store fails deterministically.
 
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -109,6 +110,13 @@ impl KeyCustody for SabotageCustody {
             Sabotage::None => {}
             Sabotage::RemoveDirectory => {
                 let _ = std::fs::remove_dir_all(&self.dir);
+                // Portability adaptation because Windows keeps self.dir
+                // alive while state.json.lock stands open, so block the
+                // rename target on Windows to force the first publish to fail.
+                #[cfg(windows)]
+                {
+                    let _ = std::fs::create_dir_all(self.dir.join("state.json").join("blocker"));
+                }
             }
             Sabotage::BlockStatePath => {
                 let state = self.dir.join("state.json");
@@ -188,7 +196,10 @@ fn plaintext_store(dir: &Path) -> PathBuf {
     let document = decrypt_document(&raw, &key);
     let state = dir.join("state.json");
     std::fs::write(&state, document).unwrap();
-    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o600)).unwrap();
+    #[cfg(unix)]
+    {
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
     state
 }
 
