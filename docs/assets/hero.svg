@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 360" width="1200" height="360" role="img">
+  <defs>
+    <linearGradient id="db-hero-bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0b101b"/>
+      <stop offset="55%" stop-color="#0f172a"/>
+      <stop offset="100%" stop-color="#0b1120"/>
+    </linearGradient>
+    <linearGradient id="db-hero-accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#10b981"/>
+      <stop offset="100%" stop-color="#fbbf24"/>
+    </linearGradient>
+    <linearGradient id="db-hero-panel" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#151f32"/>
+      <stop offset="100%" stop-color="#0f172a"/>
+    </linearGradient>
+    <pattern id="db-hero-grid" width="24" height="24" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1" fill="#94a3b8" fill-opacity="0.10"/>
+    </pattern>
+  </defs>
+  <rect x="4" y="4" width="1192" height="352" rx="18" fill="url(#db-hero-bg)" stroke="#243247" stroke-width="1.5"/>
+  <rect x="4" y="4" width="1192" height="352" rx="18" fill="url(#db-hero-grid)"/>
+  <path d="M 22 4.75 L 1178 4.75" stroke="url(#db-hero-accent)" stroke-width="2.5" stroke-linecap="round"/>
+  <rect x="48" y="48" width="52" height="52" rx="13" fill="#0b2920" stroke="#10b981" stroke-width="1.5"/>
+  <rect x="63" y="72" width="22" height="17" rx="4" fill="none" stroke="#10b981" stroke-width="2.5"/>
+  <path d="M 68 72 L 68 65 A 6 6 0 0 1 80 65 L 80 72" fill="none" stroke="#fbbf24" stroke-width="2.5" stroke-linecap="round"/>
+  <text x="116" y="85" font-family='ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif' font-size="38" font-weight="800" fill="#f8fafc" letter-spacing="-0.8">deadbolt</text>
+  <rect x="292" y="60" width="66" height="24" rx="12" fill="#0b2920" stroke="#10b981" stroke-width="1"/>
+  <text x="325" y="76" text-anchor="middle" font-family='ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace' font-size="12" font-weight="700" fill="#6ee7b7">v0.2.0</text>
+
+  <text x="48" y="134" font-family='ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif' font-size="20" font-weight="600" fill="#e2e8f0">Encrypted capability secrets broker for autonomous agents</text>
+  <text x="48" y="166" font-family='ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif' font-size="14" fill="#94a3b8">Enroll once from a file while tools redeem short-lived scoped tokens so raw</text>
+  <text x="48" y="188" font-family='ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif' font-size="14" fill="#94a3b8">secrets never enter the agent prompt, environment, grant receipts, or audit trail.</text>
+
+  <rect x="48" y="224" width="194" height="28" rx="14" fill="#0c2820" stroke="#10b981" stroke-width="1"/>
+  <text x="145" y="242" text-anchor="middle" font-family='ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace' font-size="12" fill="#a7f3d0">XChaCha20-Poly1305</text>
+  <rect x="254" y="224" width="206" height="28" rx="14" fill="#131c2e" stroke="#334155" stroke-width="1"/>
+  <text x="357" y="242" text-anchor="middle" font-family='ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace' font-size="12" fill="#cbd5e1">OS Keychain + Argon2id</text>
+  <rect x="472" y="224" width="134" height="28" rx="14" fill="#131c2e" stroke="#334155" stroke-width="1"/>
+  <text x="539" y="242" text-anchor="middle" font-family='ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace' font-size="12" fill="#cbd5e1">Unix mode 0600</text>
+  <rect x="48" y="264" width="182" height="28" rx="14" fill="#131c2e" stroke="#334155" stroke-width="1"/>
+  <text x="139" y="282" text-anchor="middle" font-family='ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace' font-size="12" fill="#cbd5e1">Scoped TTL 1..86400s</text>
+  <rect x="242" y="264" width="176" height="28" rx="14" fill="#131c2e" stroke="#334155" stroke-width="1"/>
+  <text x="330" y="282" text-anchor="middle" font-family='ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace' font-size="12" fill="#cbd5e1">Run-scoped cutoff</text>
+  <rect x="430" y="264" width="176" height="28" rx="14" fill="#131c2e" stroke="#334155" stroke-width="1"/>
+  <text x="518" y="282" text-anchor="middle" font-family='ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace' font-size="12" fill="#cbd5e1">Atomic store rekey</text>
+
+  <!-- Right Boundary Panel -->
+  <rect x="630" y="30" width="540" height="300" rx="14" fill="url(#db-hero-panel)" stroke="#293548" stroke-width="1.2"/>
+  <text x="654" y="60" font-family='ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif' font-size="13" font-weight="700" fill="#cbd5e1">CREDENTIAL ISOLATION BOUNDARY</text>
+
+  <rect x="654" y="76" width="492" height="68" rx="10" fill="#2a1216" stroke="#ef4444" stroke-width="1.2"/>
+  <text x="672" y="100" font-family='ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace' font-size="12" font-weight="700" fill="#fca5a5">Agent Process Context</text>
+  <text x="672" y="124" font-family='ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif' font-size="12.5" fill="#e2e8f0">Holds zero raw API keys and sees only grant_id or run_id</text>
+
+  <rect x="654" y="158" width="492" height="74" rx="10" fill="#0d261f" stroke="#10b981" stroke-width="1.2"/>
+  <text x="672" y="182" font-family='ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace' font-size="12" font-weight="700" fill="#6ee7b7">deadbolt-envelope/1 Store (Unix 0600)</text>
+  <text x="672" y="204" font-family='ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace' font-size="11.5" fill="#cbd5e1">24B random nonce + header AAD | SHA-256(token) only</text>
+  <text x="672" y="221" font-family='ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace' font-size="11" fill="#fbbf24">Keychain (macOS / Win / Secret Service) or Argon2id 64MiB</text>
+
+  <rect x="654" y="246" width="492" height="66" rx="10" fill="#0f1e36" stroke="#38bdf8" stroke-width="1.2"/>
+  <text x="672" y="270" font-family='ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace' font-size="12" font-weight="700" fill="#7dd3fc">redeem_wrapper.py -&gt; Approved Tool Child</text>
+  <text x="672" y="294" font-family='ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif' font-size="12.5" fill="#e2e8f0">Injects target env var once and strips DEADBOLT_* vars</text>
+</svg>
