@@ -1,9 +1,18 @@
 [package]
 name = "deadbolt"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
+rust-version = "1.91"
+default-run = "deadbolt"
 description = "A secrets broker for agents, where a credential is enrolled once and tools redeem scoped, expiring capability tokens so the real key never touches the agent process, with the store encrypted on disk under a key the operating system keychain holds and a passphrase route as the fallback."
 license = "MIT"
+readme = "README.md"
+repository = "https://github.com/david-engelmann/deadbolt"
+homepage = "https://github.com/david-engelmann/deadbolt"
+documentation = "https://docs.rs/deadbolt"
+keywords = ["secrets", "credentials", "keychain", "capability", "security"]
+categories = ["command-line-utilities", "cryptography"]
+exclude = [".github/**"]
 
 [lib]
 name = "deadbolt"
