@@ -2,6 +2,8 @@
 
 Deadbolt is an encrypted local secrets broker for autonomous agent workflows. Instead of placing raw API keys or cloud tokens inside an agent's environment or prompt context, an operator enrolls each secret once into a sealed `deadbolt` store, mints short-lived capability tokens scoped to a single `resource` and `action`, and redeems those tokens only inside approved tool subprocesses.
 
+![deadbolt architecture](assets/architecture.svg)
+
 ## 1. Custody routes and envelope encryption
 
 Every `deadbolt` store is sealed on disk inside a `deadbolt-envelope/1` envelope encrypted with `XChaCha20-Poly1305` under a fresh 24-byte random nonce on every write, with the envelope header authenticated as additional data (`AAD`). On Unix systems, the state file is created with mode `0600` (owner read and write only), and Deadbolt refuses to open any store whose permissions grant group or world access.

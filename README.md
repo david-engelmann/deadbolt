@@ -1,10 +1,14 @@
 # deadbolt
 
+![deadbolt overview](docs/assets/hero.svg)
+
 A secrets broker for agents, where a credential is enrolled once and tools redeem scoped, expiring capability tokens so the real key never touches the agent process, with the store encrypted on disk under a key the operating system keychain holds and a passphrase route as the fallback.
 
 Deadbolt is one local binary backed by a Rust library, working over one state file. An operator enrolls a credential once, naming the scopes it may be granted for and taking the value from a file, never from an argument. A tool then asks for a grant against one enrolled scope and receives a capability token, and the state keeps only the hash of that token. Redeem presents the token and returns the real value only while the grant stands live for exactly the scope it names, and every refusal names its reason. The state document sits inside an encrypted envelope on disk, sealed under a key the operating system keychain holds, or under a key derived from a passphrase on a machine where no keychain service answers. Portcullis guards the calls, deadbolt guards the credentials the calls ask for.
 
-[![CI](https://github.com/david-engelmann/deadbolt/actions/workflows/ci.yml/badge.svg)](https://github.com/david-engelmann/deadbolt/actions/workflows/ci.yml)
+[![CI](https://github.com/david-engelmann/deadbolt/actions/workflows/ci.yml/badge.svg)](https://github.com/david-engelmann/deadbolt/actions/workflows/ci.yml) [![Portability](https://github.com/david-engelmann/deadbolt/actions/workflows/portability.yml/badge.svg)](https://github.com/david-engelmann/deadbolt/actions/workflows/portability.yml) [![Release v0.2.0](https://img.shields.io/github/v/release/david-engelmann/deadbolt)](https://github.com/david-engelmann/deadbolt/releases/tag/v0.2.0) [![Rust 1.91+](https://img.shields.io/badge/rust-1.91%2B-orange.svg)](Cargo.toml) [![License MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+[Install](#install) | [Quickstart](#quickstart) | [Architecture](#architecture) | [Usage](#usage) | [Guides and examples](#guides-and-examples) | [Operator Guide](docs/GUIDE.md) | [Contributing](CONTRIBUTING.md) | [Contract](CONTRACT.md)
 
 ```
 {"enrolled":"api-key"}
@@ -63,6 +67,19 @@ deadbolt --state quickstart.json redeem --token 5aea44dddf7a58eed31a1c0b37b0cf80
 ```
 SYNTHETIC-TEST-VALUE-api-key
 ```
+
+## Architecture
+
+![deadbolt architecture](docs/assets/architecture.svg)
+
+Every broker mutation acquires `<state>.lock`, enforces Unix `0600` owner-only permissions on standing stores, authenticates the `deadbolt-envelope/1` header as `XChaCha20-Poly1305` additional data under a fresh 24-byte random nonce, zeroizes key material on drop, and publishes by atomic rename.
+
+| Layer | Mechanism | Security guarantee |
+| --- | --- | --- |
+| Key custody (`keychain` or `passphrase`) | OS Keychain (macOS Keychain, Windows Credential Manager, Linux Secret Service) or `Argon2id` (`64 MiB`, `3` iterations, 16-byte salt) | Bound at store creation with atomic migration via `rekey` and zero silent cross-route fallback |
+| Sealed envelope (`deadbolt-envelope/1`) | `XChaCha20-Poly1305` AEAD with header bytes bound as `AAD` and Unix mode `0600` enforcement | Detects ciphertext or header tampering and refuses group-accessible or world-accessible files |
+| Capability tokens (`grant` and `redeem`) | 32-byte random token printed once, stored only as `SHA-256`, scoped to `resource` and `action` with `1..86400` second TTL | Raw credentials never appear in broker grant receipts, `status` output, or `audit` records, and `redeem_wrapper.py` injects secrets only into approved child processes |
+| Lifecycle revocation (`revoke`, `cutoff`, `rotate`, `replace`, `retire`) | Incarnation-stamped credentials and run-tagged grants | Instant per-grant, per-run, or predecessor revocation with distinct refusal reasons |
 
 ## Usage
 
@@ -351,7 +368,7 @@ Deadbolt is completely standalone and depends on zero sibling packages. In hosts
 
 ## Guides and examples
 
-Read [docs/GUIDE.md](docs/GUIDE.md) for the operator and credential custody guide covering keychain versus Argon2id passphrase custody, `XChaCha20-Poly1305` envelope sealing, scope and TTL design, zero-leak secret injection through [examples/redeem_wrapper.py](examples/redeem_wrapper.py), rotation, atomic rekey, and emergency run cutoff. From a local checkout, run the self-contained Rust and Python quickstarters in [examples/quickstart.rs](examples/quickstart.rs) and [examples/broker_walkthrough.py](examples/broker_walkthrough.py).
+Read [docs/GUIDE.md](docs/GUIDE.md) for the operator and credential custody guide covering keychain versus Argon2id passphrase custody, `XChaCha20-Poly1305` envelope sealing, scope and TTL design, zero-leak secret injection through [examples/redeem_wrapper.py](examples/redeem_wrapper.py), rotation, atomic rekey, and emergency run cutoff, and see [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md) for contributor gates and vulnerability reporting. From a local checkout, run the self-contained Rust and Python quickstarters in [examples/quickstart.rs](examples/quickstart.rs) and [examples/broker_walkthrough.py](examples/broker_walkthrough.py).
 
 ```
 cargo build --bin deadbolt
