@@ -14,9 +14,15 @@ SYNTHETIC-TEST-VALUE-api-key
 
 ## Install
 
-Install from a clean checkout with Cargo. The checkout ships two binaries, and the install names the deadbolt binary on its own because a shared scanner binary of the same name from a sibling repo blocks a plain install of every binary at once.
+Install from Crates.io or from a clean checkout with Cargo. Pass `--bin deadbolt` so only the `deadbolt` binary is installed without the shared `codepoint_scan` helper.
 
 On Linux the build also needs the libdbus-1 development package, libdbus-1-dev, and pkg-config, the two the workflow installs before its gate.
+
+```
+cargo install deadbolt --bin deadbolt
+```
+
+From a local checkout, install the binary with Cargo.
 
 ```
 git clone https://github.com/david-engelmann/deadbolt.git
@@ -329,6 +335,20 @@ deadbolt --state usage.json audit
 {"seq":8,"at":1794115953,"kind":"redeem","credential":"api-key","resource":"bucket","action":"read","run_id":"demo-run","outcome":"refused, revoked"}
 ```
 
+### Status, rekey, and the redeem wrapper
+
+The `status` command prints a non-secret JSON summary of the store's custody route, store identifier, enrolled credentials, standing and ended grants, and audit entry count without touching the sealed file on disk or exposing any secret value, token, or token hash. The `rekey` command atomically rotates a store across passphrases or between `keychain` and `passphrase` routes using `DEADBOLT_NEW_PASSPHRASE` when targeting `passphrase`, and `examples/redeem_wrapper.py` redeems a grant token and injects the secret into one child command's environment variable while stripping `DEADBOLT_TOKEN`, `DEADBOLT_PASSPHRASE`, and `DEADBOLT_NEW_PASSPHRASE`.
+
+```
+deadbolt --state usage.json status
+DEADBOLT_NEW_PASSPHRASE='SYNTHETIC-TEST-VALUE-next-pass' deadbolt --state usage.json rekey --to-route passphrase
+DEADBOLT_PASSPHRASE='SYNTHETIC-TEST-VALUE-next-pass' DEADBOLT_TOKEN="$TOKEN" python3 examples/redeem_wrapper.py --state usage.json --scope bucket:read --env-var API_KEY -- /bin/sh -c 'test -n "$API_KEY"'
+```
+
+### Optional composition
+
+Deadbolt is completely standalone and depends on zero sibling packages. In hosts that combine multiple tools, `portcullis` gates whether a proposed call may run, `deadbolt` mints a short-lived scoped grant tagged with `--run RUN_ID` and injects it into an approved tool process via `examples/redeem_wrapper.py`, `arvin` tracks run health and triggers `deadbolt --state vault.json cutoff --run RUN_ID` on escalation, and `mayfly` isolates the child command with `--allow-env`.
+
 ## Status
 
 The broker works end to end through the command line and the library against one state file. Enrollment, grant, redeem, revoke, cutoff, retire, rotation, replacement, non-secret status, store rekey, and the audit read all stand landed and tested. The state file holds the deadbolt-state/1 document inside a deadbolt-envelope/1 envelope, sealed with XChaCha20-Poly1305 under a fresh random 24 byte nonce per write, with the header bytes authenticated as written. The unlock key stands in the operating system keychain on macOS, in the Windows credential store, and in Linux Secret Service. Where no keychain service answers, the passphrase route is the fallback, its key derived from a per-session passphrase with Argon2id and never stored. The state file is owner only, and the broker refuses to operate on it when its mode grants anyone else access.
@@ -339,7 +359,7 @@ What is not built. Deadbolt has no daemon, no network service, and no Python bin
 
 Closed perfection rounds are 100 of 100. A round counts only when a full cycle of work and audit and review and red team and approval has closed, and seeding and setup are not rounds.
 
-The contract lives in CONTRACT.md, where obligations DK-1 to DK-28 state the broker semantics, the limits, and the custody, envelope, status, and rekey rules.
+The contract lives in CONTRACT.md, where obligations DK-1 to DK-29 state the broker semantics, the limits, and the custody, envelope, status, rekey, and v0.2.0 release packaging rules.
 
 The remote seed was verified on 2026-11-02 against the staged seed and its commit is 08a05b881350c6ca5eb8a42af28d25f194c6d039, a parentless commit holding exactly README.md and LICENSE and .gitignore.
 
