@@ -359,7 +359,7 @@ What is not built. Deadbolt has no daemon, no network service, and no Python bin
 
 Closed perfection rounds are 100 of 100. A round counts only when a full cycle of work and audit and review and red team and approval has closed, and seeding and setup are not rounds.
 
-The contract lives in CONTRACT.md, where obligations DK-1 to DK-28 state the broker semantics, the limits, and the custody, envelope, status, and rekey rules.
+The contract lives in CONTRACT.md, where obligations DK-1 to DK-29 state the broker semantics, the limits, and the custody, envelope, status, rekey, and v0.2.0 release packaging rules.
 
 The remote seed was verified on 2026-11-02 against the staged seed and its commit is 08a05b881350c6ca5eb8a42af28d25f194c6d039, a parentless commit holding exactly README.md and LICENSE and .gitignore.
 
