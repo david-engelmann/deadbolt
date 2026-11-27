@@ -14,12 +14,12 @@ SYNTHETIC-TEST-VALUE-api-key
 
 ## Install
 
-Install from Crates.io or from a clean checkout with Cargo. Pass `--bin deadbolt` so only the `deadbolt` binary is installed without the shared `codepoint_scan` helper.
+Install the `deadbolt` CLI from the `v0.2.0` git tag with Cargo, download prebuilt Linux, macOS, and Windows binary archives from [the v0.2.0 GitHub Release](https://github.com/david-engelmann/deadbolt/releases/tag/v0.2.0), or build from a clean checkout. Pass `--bin deadbolt` so only the `deadbolt` binary is installed without the shared `codepoint_scan` helper.
 
-On Linux the build also needs the libdbus-1 development package, libdbus-1-dev, and pkg-config, the two the workflow installs before its gate.
+On Linux, building from source also needs the `libdbus-1` development package, `libdbus-1-dev`, and `pkg-config`, the two the workflow installs before its gate.
 
 ```
-cargo install deadbolt --bin deadbolt
+cargo install --git https://github.com/david-engelmann/deadbolt.git --tag v0.2.0 --bin deadbolt
 ```
 
 From a local checkout, install the binary with Cargo.
@@ -348,6 +348,16 @@ DEADBOLT_PASSPHRASE='SYNTHETIC-TEST-VALUE-next-pass' DEADBOLT_TOKEN="$TOKEN" pyt
 ### Optional composition
 
 Deadbolt is completely standalone and depends on zero sibling packages. In hosts that combine multiple tools, `portcullis` gates whether a proposed call may run, `deadbolt` mints a short-lived scoped grant tagged with `--run RUN_ID` and injects it into an approved tool process via `examples/redeem_wrapper.py`, `arvin` tracks run health and triggers `deadbolt --state vault.json cutoff --run RUN_ID` on escalation, and `mayfly` isolates the child command with `--allow-env`.
+
+## Guides and examples
+
+Read [docs/GUIDE.md](docs/GUIDE.md) for the operator and credential custody guide covering keychain versus Argon2id passphrase custody, `XChaCha20-Poly1305` envelope sealing, scope and TTL design, zero-leak secret injection through [examples/redeem_wrapper.py](examples/redeem_wrapper.py), rotation, atomic rekey, and emergency run cutoff. From a local checkout, run the self-contained Rust and Python quickstarters in [examples/quickstart.rs](examples/quickstart.rs) and [examples/broker_walkthrough.py](examples/broker_walkthrough.py).
+
+```
+cargo build --bin deadbolt
+cargo run --example quickstart
+python3 examples/broker_walkthrough.py
+```
 
 ## Status
 
